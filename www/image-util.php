@@ -7,13 +7,21 @@ include_once "dbconnect.php";
 //
 function fetch_image($imageID, $getPic)
 {
+    if ($imageID === null || $imageID === '') {
+        return [null, null];
+    }
+
     // parse the image ID:  <dbnum>:<image key>
-    list ($dbnum, $key) = explode(":", $imageID);
+    $parts = explode(":", (string)$imageID, 2);
+    if (count($parts) < 2) {
+        return [null, null];
+    }
+    [$dbnum, $key] = $parts;
 
     // connect to the database encoded in the ID
     $db = imageDbConnect((int)$dbnum);
     if (!$db)
-        return false;
+        return [null, null];
 
     // set up to get or skip the image data stream
     $imgcol = ($getPic ? "img" : "null");
@@ -24,8 +32,43 @@ function fetch_image($imageID, $getPic)
         "select $imgcol, format, copystat, copyright, userid
          from images where id='$key'", $db);
 
-    // if we got a result, return it
-    return mysql_fetch_row($result);
+    $row = $result ? mysql_fetch_row($result) : false;
+    return $row ?: [null, null];
+}
+
+// Public local-dev has no production images dump. When an image is
+// missing locally, send the browser to ifdb.org, which still has the
+// original artwork. Newly uploaded local images are served from MySQL
+// and never reach this fallback.
+function redirectMissingImageToProductionIfLocal()
+{
+    if (localImageCredentials() !== null) {
+        return false;
+    }
+    if (!isLocalImageFallbackHost()) {
+        return false;
+    }
+    if (empty($_SERVER['REQUEST_URI'])) {
+        return false;
+    }
+
+    $production = defined('PRODUCTION_SERVER_NAME') ? PRODUCTION_SERVER_NAME : 'ifdb.org';
+
+    // Local pagevsn can run ahead of production after test edits.
+    // Omit version so ifdb.org serves its current cover instead of 404ing.
+    $parts = parse_url($_SERVER['REQUEST_URI']);
+    $path = $parts['path'] ?? '/';
+    $query = [];
+    if (!empty($parts['query'])) {
+        parse_str($parts['query'], $query);
+    }
+    unset($query['version']);
+    $qs = http_build_query($query);
+    $location = "https://" . $production . $path . ($qs !== "" ? "?$qs" : "");
+
+    header("HTTP/1.1 302 Found");
+    header("Location: $location");
+    exit();
 }
 
 // ------------------------------------------------------------------------
@@ -61,8 +104,10 @@ define("SIF_RAW", 0x0001);
 function sendImage($imgData, $imgFmt, $thumbnail, $flags = 0)
 {
     // make sure there's an image
-    if (is_null($imgData))
+    if (is_null($imgData)) {
+        redirectMissingImageToProductionIfLocal();
         exit("No image is available");
+    }
 
     // Get the MIME type, assuming for now that it's an image.  For image
     // types, the MIME type is simply "image/X", where X is our format code
@@ -123,10 +168,15 @@ function sendImage($imgData, $imgFmt, $thumbnail, $flags = 0)
     // if they only want the thumbnail, resize it
     if (!is_null($thumbnail)) {
         // get the thumbnail sizes
-        list ($sx, $sy) = explode("x", $thumbnail);
+        $parts = explode("x", (string)$thumbnail, 2);
+        $sx = (int)($parts[0] ?? 0);
+        $sy = (int)($parts[1] ?? 0);
 
         // get the image data
         $source = imagecreatefromstring($imgData);
+        if ($source === false) {
+            exit("No image is available");
+        }
         $ix = imagesx($source);
         $iy = imagesy($source);
 
@@ -134,9 +184,9 @@ function sendImage($imgData, $imgFmt, $thumbnail, $flags = 0)
         if ($sx < $ix || $sy < $iy) {
             // apply the default and maximum settings
             if ($sx <= 0 || $sy <= 0)
-                list($sx, $sy) = array(175, 175);
+                [$sx, $sy] = [175, 175];
             else if ($sx > 250 || $sy > 250)
-                list($sx, $sy) = array(250, 250);
+                [$sx, $sy] = [250, 250];
 
             // Figure the scaled size, maintaining the aspect ratio.
             // First try scaling so that the width just fits the bounding

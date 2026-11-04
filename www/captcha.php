@@ -267,10 +267,10 @@ function captchaCheckPost($sessionKey)
             $_SERVER["REMOTE_ADDR"],
             $_POST["g-recaptcha-response"]);
 
-        return array($resp->is_valid, $resp->error);
+        return [$resp->is_valid, $resp->error];
     }
     else
-        return array(false, false);
+        return [false, false];
 }
 
 // ------------------------------------------------------------------------
@@ -286,6 +286,9 @@ function getCaptchaSubForm($sessionKey, $errMsg, $requiredCaption)
 {
     $result = "";
 
+    if (is_array($errMsg)) {
+        $errMsg = implode(", ", $errMsg);
+    }
     if ($errMsg == "incorrect-captcha-sol")
         $result .= "<div><span class=\"errmsg\">Please verify that you're not a robot</span></div>";
     else if ($errMsg)

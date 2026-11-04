@@ -7,7 +7,7 @@ include_once "local-credentials.php";
 /*
 
     function localCredentials() {
-        return array("127.0.0.1", "username", "password");
+        return ["127.0.0.1", "username", "password"];
     }
 
     function localImageCredentials() {
@@ -15,10 +15,10 @@ include_once "local-credentials.php";
     }
 
     function localRecaptchaKeys() {
-        return array(
+        return [
             "public" => "public-key",
             "private" => "private-key",
-        );
+        ];
     }
 
     function localAkismetKey() {
@@ -56,13 +56,37 @@ function imageDbConnect($dbnum)
 {
     $dbinfo = localImageCredentials();
 
+    // Public local-dev has no images dump (localImageCredentials() is
+    // null). Still store newly uploaded images in the main local MySQL
+    // instance so cover-art uploads work. Docker creates the empty
+    // ifdb_images* schemas during initdb.
+    if ($dbinfo === null) {
+        if (!isLocalImageFallbackHost()) {
+            return false;
+        }
+        $dbinfo = localCredentials();
+    }
+
     // connect and select the database
     $db = mysql_connect($dbinfo[0], $dbinfo[1], $dbinfo[2]);
-    if ($db != false)
-        mysql_select_db("ifdb_images" . $dbnum, $db);
+    if ($db == false) {
+        return false;
+    }
+
+    if (!mysql_select_db("ifdb_images" . $dbnum, $db)) {
+        return false;
+    }
 
     // return the connection
     return $db;
+}
+
+function isLocalImageFallbackHost()
+{
+    $server = $_SERVER['SERVER_NAME'] ?? '';
+    $production = defined('PRODUCTION_SERVER_NAME') ? PRODUCTION_SERVER_NAME : 'ifdb.org';
+    $staging = defined('STAGING_SERVER_NAME') ? STAGING_SERVER_NAME : 'dev.ifdb.org';
+    return $server !== $production && $server !== $staging;
 }
 
 // --------------------------------------------------------------------------
@@ -70,6 +94,10 @@ function imageDbConnect($dbnum)
 
 define("MYSQL_ASSOC", MYSQLI_ASSOC);
 define("MYSQL_BOTH",  MYSQLI_BOTH);
+
+// PHP 8.1+ defaults to MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT, which
+// turns failed queries into exceptions. Callers still check false returns.
+mysqli_report(MYSQLI_REPORT_OFF);
 
 $query_i = 0;
 
@@ -118,59 +146,22 @@ function mysql_execute_query($db, $query, $params = null) {
     }
 }
 function mysql_num_rows($result) { return $result ? mysqli_num_rows($result) : 0; }
-function mysql_fetch_array($result, $match_type = MYSQLI_BOTH) { return mysqli_fetch_array($result, $match_type); }
-function mysql_fetch_row($result) { return mysqli_fetch_row($result); }
+function mysql_fetch_array($result, $match_type = MYSQLI_BOTH) { return $result ? mysqli_fetch_array($result, $match_type) : false; }
+function mysql_fetch_row($result) { return $result ? mysqli_fetch_row($result) : false; }
 function mysql_close($db) { return mysqli_close($db); }
 function mysql_error($db) { return mysqli_error($db); }
 function mysql_errno($db) { return mysqli_errno($db); }
 function mysql_result($result, $row, $field = 0) {
+    if (!$result) {
+        return null;
+    }
     mysqli_data_seek($result, $row);
-    $row = mysqli_fetch_assoc($result);
-    return $row[$field];
+    $fetched = mysqli_fetch_assoc($result);
+    if (!$fetched) {
+        return null;
+    }
+    return $fetched[$field] ?? null;
 }
 function mysql_insert_id($linkid) { return mysqli_insert_id($linkid); }
-
-/**
- * Polyfill for mysqli_execute_query, available in PHP 8.2
- * Copied from https://php.watch/versions/8.2/mysqli_execute_query
- *
- * Prepares an SQL statement, binds parameters, executes, and returns the result.
- * @param mysqli $mysql A mysqli object returned by mysqli_connect() or mysqli_init()
- * @param mysqli $mysql A mysqli object returned by mysqli_connect() or mysqli_init()
- * @param string $query The query, as a string. It must consist of a single SQL statement.  The SQL statement may contain zero or more parameter markers represented by question mark (?) characters at the appropriate positions.
- * @param ?array $params An optional list array with as many elements as there are bound parameters in the SQL statement being executed. Each value is treated as a string.
- * @return mysqli_result|bool Results as a mysqli_result object, or false if the operation failed.
- */
-if (!function_exists('mysqli_execute_query')) {
-function mysqli_execute_query(mysqli $mysqli, string $sql, array $params = null) {
-  $driver = new mysqli_driver();
-
-  $stmt = $mysqli->prepare($sql);
-  if (!($driver->report_mode & MYSQLI_REPORT_STRICT) && $mysqli->error) {
-    return false;
-  }
-
-  if (!empty($params)) {
-    mysqli_stmt_bind_param($stmt, str_repeat('s', count($params)), ...$params);
-    if (!($driver->report_mode & MYSQLI_REPORT_STRICT) && $stmt->error) {
-      return false;
-    }
-  }
-
-  $stmt->execute();
-  if (!($driver->report_mode & MYSQLI_REPORT_STRICT) && $stmt->error) {
-    return false;
-  }
-
-  $result = $stmt->get_result();
-  // $stmt->get_result() returns false on successful INSERT/UPDATE statements
-  // https://www.php.net/manual/en/mysqli-stmt.get-result.php#refsect1-mysqli-stmt.get-result-returnvalues
-  if ($result === false && !$stmt->errno) {
-    return true;
-  } else {
-    return $result;
-  }
-}
-}
 
 ?>

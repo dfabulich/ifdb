@@ -1,13 +1,21 @@
 import { compYear } from './settings.mjs';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { XMLParser } from 'fast-xml-parser';
 
-// TODO we shouldn't need microdata-tuids; we should just get TUID platforms via https://ifcomp.org/comp/YYYY/json
-// https://github.com/iftechfoundation/ifcomp/pull/436
+const ifcompGames = await fetch(`https://ifcomp.org/comp/${compYear}/json`).then(r => r.json());
 
-const microdata = JSON.parse(readFileSync('microdata-tuids.json', 'utf8')).sort((a, b) => a.name.localeCompare(b.name));
+if (!ifcompGames[0].ifdb_id) {
+    if (!existsSync('tuid-entry-map.json')) {
+        throw new Error("IFComp hasn't run populate_ifdb_ids.pl. Ask the IFComp team to run that script, or run compute-tuid-entry-map.mjs to generate tuid-entry-map.json.");
+    }
+    const tuidsByEntryId = JSON.parse(readFileSync('tuid-entry-map.json'));
+    const entryIdsByTuid = Object.fromEntries(Object.entries(tuidsByEntryId).map(([tuid,entry]) => [entry, tuid]));
+    for (const game of ifcompGames) {
+        game.ifdb_id = entryIdsByTuid[game.id];
+    }
+}
 
-const microdataByTuid = Object.fromEntries(microdata.map(m => [m.tuid, m]));
+const ifcompGamesByTuid = Object.fromEntries(ifcompGames.map(g => [g.ifdb_id, g]));
 
 function fileTuid(file) {
     if (!file.metadata) return null;
@@ -23,7 +31,12 @@ function fileTuid(file) {
 
 const xml = new XMLParser().parse(await fetch('https://ifarchive.org/indexes/Master-Index.xml').then(r=>r.text()));
 
-const links = xml.ifarchive.file.filter(f => f.path.startsWith(`if-archive/games/competition${compYear}`) && fileTuid(f));
+const compDir = `if-archive/games/competition${compYear}`;
+const links = xml.ifarchive.file.filter(f => f.path.startsWith(compDir) && fileTuid(f));
+
+if (!links.length) {
+    throw new Error(`No files found in ${compDir} with TUID metadata; contact the IF Archive team?`);
+}
 
 const formats = {
     "html": "hypertextgame",
@@ -37,46 +50,61 @@ const formats = {
 }
 
 const extensionsByPlatform = {
-    'Web-based': ['html'],
-    'ChoiceScript': ['html'],
-    'Ink': ['html'],
-    'Texture': ['html'],
-    'Twine': ['html'],
-    'Adventuron': ['html'],
-    'Z-code': ['zblorb', 'z5', 'z8'],
-    'Glulx': ['gblorb', 'ulx'],
-    'TADS': ['t3'],
-    'Windows Executable': ['exe'],
+    'website': ['html'],
+    'choicescript': ['html'],
+    'ink': ['html'],
+    'texture': ['html'],
+    'twine': ['html'],
+    'adventuron': ['html'],
+    'zcode': ['zblorb', 'z5', 'z8'],
+    'inform': ['gblorb', 'ulx'],
+    'parchment': ['html', 'gblorb', 'ulx'],
+    'inform-website': ['gblorb', 'ulx'],
+    'quixe': ['gblorb', 'ulx', 'html'],
+    'tads': ['t3'],
+    'windows': ['exe'],
+    'other': [],
 }
 
-function findFileMatchingExtensions(path, files, extensions) {
+function findFileMatchingExtensions(path, files, gamePlatform) {
+    const extensions = extensionsByPlatform[gamePlatform];
+    if (!extensions) {
+        throw new Error("No known extensions for gamePlatform " + gamePlatform);
+    }
     let candidates = files.filter(f => {
         if (f.startsWith('__MACOSX/')) return false;
+        if (f.endsWith("UnityCrashHandler64.exe")) return false;
         for (const extension of extensions) {
             if (f.endsWith('.' + extension)) return true;
         }
         return false;
     });
 
-    // if there are multiple HTML candidates, prefer `index.html`
-    if (candidates.length > 1 && extensions.length === 1 && extensions[0] === 'html') {
-        const indexHtml = candidates.filter(f => f.split("/").at(-1) === "index.html");
-        if (indexHtml.length === 1) {
-            candidates = indexHtml;
+    // if there are multiple HTML candidates, prefer `play.html`, then `index.html`
+    if (candidates.length > 1 && candidates.every(f => f.split("/").at(-1).split(".").at(-1) === "html")) {
+        const playHtml = candidates.filter(f => f.split("/").at(-1) === "play.html");
+        if (playHtml.length === 1) {
+            candidates = playHtml;
+        } else {
+            const indexHtml = candidates.filter(f => f.split("/").at(-1) === "index.html");
+            if (indexHtml.length === 1) {
+                candidates = indexHtml;
+            }
         }
     }
 
     if (candidates.length === 0) {
-        console.log(`no candidate [${extensions.join(' ')}] files for ${path}`);
+        console.log(`no candidate ${gamePlatform} [${extensions.join(' ')}] files for ${path}`);
         return null;
     } else if (candidates.length > 1) {
-        console.log(`too many candidate [${extensions.join(' ')}] files for ${path}:\n  ${candidates.join('\n  ')}`);
+        console.log(`too many candidate ${gamePlatform} [${extensions.join(' ')}] files for ${path}:\n  ${candidates.join('\n  ')}`);
     }
     return candidates;
 }
 
 const results = await Promise.all(links.map(async (link) => {
     const tuid = fileTuid(link);
+    const ifcompGame = ifcompGamesByTuid[tuid];
     const { name, path } = link;
     const url = `https://ifarchive.org/${path}`;
     const extension = name.split('.').at(-1);
@@ -90,21 +118,13 @@ const results = await Promise.all(links.map(async (link) => {
             // console.log(unboxUrl);
             const response = await fetch(unboxUrl);
             const {files} = JSON.parse(await response.text());
-            const {name: title, gamePlatform} = microdataByTuid[tuid];
+            const gamePlatform = ifcompGame.is_zcode ? "zcode" : ifcompGame.platform;
             if (!gamePlatform) {
-                console.log(`No gamePlatform for ${path} ${tuid} "${title}"`);
+                console.log(`No gamePlatform for ${path} ${tuid}`);
                 return { tuid, name, url };
             }
-            const extensions = extensionsByPlatform[gamePlatform];
-            if (!extensions) {
-                throw new Error("No known extensions for gamePlatform " + gamePlatform);
-            }
-            const candidates = findFileMatchingExtensions(path, files, extensions);
-            if (candidates?.length > 1) {
-                const extension = candidates[0].split('.').at(-1);
-                const format = formats[extension];
-                return { tuid, name, url, format };
-            } else if (candidates?.length === 1) {
+            const candidates = findFileMatchingExtensions(path, files, gamePlatform);
+            if (candidates?.length > 0) {
                 const zipMainFile = candidates[0];
                 const extension = zipMainFile.split('.').at(-1);
                 const format = formats[extension];

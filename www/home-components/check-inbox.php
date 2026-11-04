@@ -3,9 +3,6 @@
 
 // check the inbox
 if ($quid) {
-    if (!$newCaughtUp || $srow[4] > $newCaughtUp)
-        $newCaughtUp = $srow[4];
-
     // $inboxCnt is returned by the queryComments function, which is
     // defined in commentutil.php and called in pagetpl.php
     if ($inboxCnt) {
@@ -28,7 +25,7 @@ if ($quid) {
             $since = "since ". date("F j, Y", strtotime($caughtUpDate));
         }
 
-        list($crow) = $inbox[0];
+        [$crow] = $inbox[0];
         $cid = $crow[0];
         $cdate = $crow[5];
         $newCaughtUp = $crow[4];

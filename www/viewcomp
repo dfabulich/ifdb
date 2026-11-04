@@ -34,7 +34,7 @@ $pagevsn = ($rss ? false : get_req_data("vsn"));
 // clear out the query results
 $rec = false;
 $hID = $hEditorID = $hEditorName = $hModDate = $hVsn = $deltas = false;
-$history = array();
+$history = [];
 
 // query the competition's database records
 if (!$errMsg) {
@@ -88,7 +88,7 @@ if (!$errMsg) {
          order by
            divno", $db);
 
-    for ($i = 0, $divs = array() ; $i < mysql_num_rows($result) ; $i++)
+    for ($i = 0, $divs = [] ; $i < mysql_num_rows($result) ; $i++)
         $divs[] = mysql_fetch_array($result, MYSQL_ASSOC);
 
     // query the games
@@ -104,13 +104,15 @@ if (!$errMsg) {
          order by
            c.seqno", $db);
 
-    for ($i = 0, $games = array() ; $i < mysql_num_rows($result) ; $i++)
+    for ($i = 0, $games = [] ; $i < mysql_num_rows($result) ; $i++)
         $games[] = mysql_fetch_array($result, MYSQL_ASSOC);
 
     // save the divisions and games in the main record, in case we need
     // to apply deltas
-    $rec["divisions"] = $divs;
-    $rec["games"] = $games;
+    if (is_array($rec)) {
+        $rec["divisions"] = $divs;
+        $rec["games"] = $games;
+    }
 
     // if we want the version history, or an old page version, get the history
     if ($rss || $historyView || $pagevsn) {
@@ -137,7 +139,7 @@ if (!$errMsg) {
 
     // if we're viewing an old version, apply reverse deltas to get to the
     // desired page version
-    if ($pagevsn && $pagevsn != $rec["pagevsn"]) {
+    if ($pagevsn && is_array($rec) && $pagevsn != $rec["pagevsn"]) {
 
         // we haven't applied any deltas for the game list yet
         $gameDeltas = false;
@@ -146,11 +148,14 @@ if (!$errMsg) {
         for ($i = 0 ; $i < count($history) ; $i++)
         {
             // decode this history record
-            list($hEditorID, $hEditorName,
-                 $hModDate, $hVsn, $deltas, $hRawModDate) = $history[$i];
+            [$hEditorID, $hEditorName,
+                $hModDate, $hVsn, $deltas, $hRawModDate] = $history[$i];
 
             // apply the deltas
-            $deltas = unserialize($deltas);
+            $deltas = @unserialize($deltas);
+            if (!is_array($deltas)) {
+                $deltas = [];
+            }
             foreach ($deltas as $col => $colval)
                 $rec[$col] = $colval;
 
@@ -192,7 +197,7 @@ if (!$errMsg) {
                 // look it up
                 $result = mysql_query(
                     "select title, author from games where id='$gameid'", $db);
-                list($title, $author) = mysql_fetch_row($result);
+                [$title, $author] = mysql_fetch_row($result);
 
                 // patch up the record
                 $g["title"] = $title;
@@ -208,17 +213,22 @@ if (!$errMsg) {
     }
 
     // set the page title to the comp title
-    $pageTitle = htmlspecialcharx($rec["title"]) . " - Details";
+    if (is_array($rec) && isset($rec["title"])) {
+        $pageTitle = htmlspecialcharx($rec["title"]) . " - Details";
+    }
 }
 
 // given a history delta record, generate a printable list of changed items
 function deltaDesc($deltas)
 {
     // unserialize the deltas
-    $deltas = unserialize($deltas);
+    $deltas = @unserialize($deltas);
+    if (!is_array($deltas)) {
+        return "";
+    }
 
     // get a human-readable list of the deltas
-    $deltaNames = array(
+    $deltaNames = [
         "title" => "name",
         "series" => "series name",
         "desc" => "description",
@@ -230,10 +240,10 @@ function deltaDesc($deltas)
         "awarddate" => "award date",
         "divisions" => "divisions",
         "games" => "list of games"
-    );
+    ];
 
     // build the list of names
-    $dn = array();
+    $dn = [];
     foreach ($deltaNames as $col => $name)
     {
         // if this column is set in the deltas, add it to the name list
@@ -255,13 +265,13 @@ function compNewsTitle($ctx, $headline)
 if ($rss)
 {
     // start with an empty result list
-    $items = array();
+    $items = [];
 
     // add history updates
     for ($i = 0 ; $i < count($history) ; $i++)
     {
         // decode this history row
-        list($hEd, $hEdName, $hMod, $hVsn, $deltas, $hModRaw) = $history[$i];
+        [$hEd, $hEdName, $hMod, $hVsn, $deltas, $hModRaw] = $history[$i];
         $hEdName = htmlspecialcharx($hEdName);
         $rssdate = date("D, j M Y H:i:s ", strtotime($hModRaw)) . 'UT';
         $dn = deltaDesc($deltas);
@@ -270,23 +280,24 @@ if ($rss)
 
         // generate this item
         $item = "<item>"
-                . "<title>Page update$to by $hEdName</title>"
+                . "<title>Page update by $hEdName</title>"
                 . "<description>New $dn</description>"
                 . "<pubDate>$rssdate</pubDate>"
                 . "<guid>$nlink</guid>"
                 . "</item>";
 
         // add it to the item list
-        $items[] = array($hModRaw, $item);
+        $items[] = [$hModRaw, $item];
     }
 
     // add the news items
     queryNewsRss($items, $db, "C", $compID, 50, "compNewsTitle", false);
 
     // send the data
-    sendRSS($rec["title"],
+    $rssTitle = is_array($rec) ? ($rec["title"] ?? "") : "";
+    sendRSS($rssTitle,
             get_root_url() . "viewcomp?id=$compID",
-            $rec["title"] . " - Competition news &amp; updates from IFDB.",
+            $rssTitle . " - Competition news &amp; updates from IFDB.",
             $items, 50);
 
     // that's it
@@ -338,7 +349,7 @@ function decodeProfiles($t)
         // look up this user ID
         $result = mysql_query(
             "select name from users where id = '$pid'", $db);
-        list($pname) = mysql_fetch_row($result);
+        [$pname] = mysql_fetch_row($result);
 
         // make it into a profile link, if we found a match
         if ($pname) {
@@ -486,7 +497,7 @@ if ($historyView) {
     for ($i = 0 ; $i < count($history) ; $i++)
     {
         // decode this row
-        list($hEd, $hEdName, $hMod, $hVsn, $deltas, $hModRaw) = $history[$i];
+        [$hEd, $hEdName, $hMod, $hVsn, $deltas, $hModRaw] = $history[$i];
         $hEdName = htmlspecialcharx($hEdName);
         $dn = deltaDesc($deltas);
 
@@ -533,7 +544,7 @@ if (!$historyView) {
             "select count(*) from comps_history
              where compid = '$compID'
              and ifnull(editedby, '') <> '$qedby'", $db);
-        list($edcnt) = mysql_fetch_row($result);
+        [$edcnt] = mysql_fetch_row($result);
         if ($edcnt == 0) {
             $deletePageLink =
                 "<a href=\"delcomp?id=$compID\">Delete This Page</a> - ";

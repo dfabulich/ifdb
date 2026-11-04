@@ -140,6 +140,13 @@ if (isset($_REQUEST['ifiction']) || $json)
     if ($desc)
         $bibliographic['description'] = $desc;
 
+    if (!isEmpty($seriesname)) {
+        $bibliographic['series'] = $seriesname;
+        if (!isEmpty($seriesnum)) {
+            $bibliographic['seriesnumber'] = $seriesnum;
+        }
+    }
+
     if ($website)
         $contacts['url'] = $website;
 
@@ -208,9 +215,9 @@ if (isset($_REQUEST['ifiction']) || $json)
     }
     if (!$should_hide) {
         $ifdb_section['averageRating'] = $ratingAvg;
-        [$stars] = roundStars($ratingAvg);
-        if ($stars) {
-            $ifdb_section['starRating'] = $stars;
+        $stars = roundStars($ratingAvg);
+        if ($stars !== false) {
+            $ifdb_section['starRating'] = $stars[0];
         }
         $ifdb_section['ratingCountAvg'] = $ratingCntAvg;
         $ifdb_section['ratingCountTot'] = $ratingCntTot;

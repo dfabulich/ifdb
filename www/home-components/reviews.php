@@ -1,13 +1,16 @@
 <div class=headline id='reviews'><h1 class='unset'>Reviews</h1></div>
 <?php
 // get the latest reviews
-list($items, $game_filter_was_applied) = getNewItems($db, 7, NEWITEMS_REVIEWS);
+[$items, $game_filter_was_applied] = getNewItems($db, 7, NEWITEMS_REVIEWS, ['reviews_limit' => 7]);
 
 // show the items
 $totcnt = count($items);
 
 for ($idx = 0 ; $idx <= 5 ; $idx++)
 {
+    if (!isset($items[$idx])) {
+        break;
+    }
     // get this item
     [$pick, $rawDate, $r] = $items[$idx];
 
@@ -35,11 +38,11 @@ for ($idx = 0 ; $idx <= 5 ; $idx++)
     // image, otherwise generic review icon
     if (ENABLE_IMAGES) {
         if ($r["haspic"]) {
-            echo "<a href=\"showuser?id={$r['userid']}\">"
+            echo "<a href=\"showuser?id={$r['userid']}\" aria-hidden=\"true\" tabindex=\"-1\">"
                 . "<img border=0 width=50 height=50 src=\"showuser?id={$r['userid']}&pic"
-                . "&thumbnail=50x50\"></a>";
+                . "&thumbnail=50x50\" alt=\"\"></a>";
         } else if ($r["hasart"]) {
-            echo "<a href=\"viewgame?id={$r['gameid']}\">"
+            echo "<a href=\"viewgame?id={$r['gameid']}\" aria-hidden=\"true\" tabindex=\"-1\">"
                 . coverArtThumbnail($r['gameid'], 50, $r['pagevsn'])
                 . "</a>";
         } else {

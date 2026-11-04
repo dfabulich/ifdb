@@ -4,3 +4,5 @@ www/local-credentials.php
 **/ifdb-archive-*.zip
 initdb
 www/vendor
+.php-cs-fixer.cache
+test/node_modules/

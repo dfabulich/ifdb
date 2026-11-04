@@ -13,7 +13,7 @@ function sortByDisplayOrder($a, $b)
 // -------------------------------------------------------------------------
 // fix a URL to ensure proper formatting in an HTML page
 function fixUrl($url) {
-    return str_replace(array("\""), array("%22"), $url);
+    return str_replace(["\""], ["%22"], $url);
 }
 
 // --------------------------------------------------------------------------
@@ -142,48 +142,20 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
     // if we want to go back in time, apply the history
     $historyView = false;
     if ($requestVersion && (int)$requestVersion != $rec['pagevsn']) {
+        [$foundvsn, $rec] = applyGameHistoryDeltas(
+            $db, $id, $rec, $requestVersion,
+            function (&$rec, $vrec, $deltas) {
+                // keep the version timestamp from the history row
+                $rec["moddate"] = $vrec["moddate"];
+                $rec["moddate2"] = $vrec["moddate2"];
 
-        // query up the version history, in order from newest to oldest
-        $result = mysqli_execute_query($db,
-            "select
-               pagevsn, deltas,
-               concat(date_format(moddate, '%e %M %Y at %l:%i'),
-                      lower(date_format(moddate, '%p'))) as moddate,
-               date_format(moddate, '%d-%b-%Y %H:%i') as moddate2
-            from games_history
-            where id = ?
-            order by pagevsn desc", [$id]);
-
-        // we haven't found our target version yet
-        $foundvsn = false;
-
-        // now run through the list until we find the requested version,
-        // applying each item's reverse deltas in order
-        while ($vrec = mysql_fetch_array($result, MYSQL_ASSOC)) {
-            // update the main record with the version's timestamp
-            $rec["moddate"] = $vrec["moddate"];
-            $rec["moddate2"] = $vrec["moddate2"];
-
-            // deserialize the array of deltas
-            $deltas = unserialize($vrec['deltas']);
-
-            // copy each modified item into the current row under construction
-            foreach ($deltas as $colname => $colval) {
-                // save this column
-                $rec[$colname] = $colval;
-
-                // if it's Cover Art, note the new 'hasart' status
-                if ($colname == "coverart")
+                // if Cover Art changed, note the new 'hasart' status
+                if (array_key_exists("coverart", $deltas)) {
+                    $colval = $deltas["coverart"];
                     $rec['hasart'] = (is_null($colval) || strlen($colval) == 0)
                                      ? null : true;
-            }
-
-            // if this is our target version, we can stop now
-            if ((int)($vrec['pagevsn']) == (int)$requestVersion) {
-                $foundvsn = true;
-                break;
-            }
-        }
+                }
+            });
 
         // if we didn't find our target version, it's an error
         if (!$foundvsn) {
@@ -221,10 +193,10 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
     $moddate2 = $rec["moddate2"];
     $moddatelatest = $rec["moddatelatest"];
     $pagevsn = $rec["pagevsn"];
-    $ifids = $rec["ifids"];
-    $links = $rec["links"];
-    $extReviews = $rec["extreviews"];
-    $xrefs = $rec["xrefs"];
+    $ifids = is_array($rec["ifids"] ?? null) ? $rec["ifids"] : [];
+    $links = is_array($rec["links"] ?? null) ? $rec["links"] : [];
+    $extReviews = is_array($rec["extreviews"] ?? null) ? $rec["extreviews"] : [];
+    $xrefs = is_array($rec["xrefs"] ?? null) ? $rec["xrefs"] : [];
     $flags = $rec["flags"];
 
     // make sure that the special name and code are set for the external
@@ -259,9 +231,13 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
             $link['fmtdesc'] = mysql_result($result, 0, "desc");
             $link['fmticon'] = mysql_result($result, 0, "hasicon");
             $link['fmtclass'] = mysql_result($result, 0, "fmtclass");
+        } else {
+            $link['fmtexternid'] = '';
+            $link['fmtname'] = '';
+            $link['fmtdesc'] = '';
+            $link['fmticon'] = false;
+            $link['fmtclass'] = '';
         }
-        else
-            echo "row not found for format $fmtid";
 
         if ($fmtos) {
             $params = [$fmtos, $fmtos];
@@ -323,8 +299,8 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
                and t.reftype = ?", [$xref['toID'], $xref['reftype']]);
 
         [$xref['toTitle'],
-         $xref['author'],
-         $xref['fromname']]
+            $xref['author'],
+            $xref['fromname']]
             = mysql_fetch_row($result);
     }
 
@@ -379,11 +355,11 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
            $gameRatingsView
          where
            gameid = ?", [$id]);
-    list($rated1, $rated2, $rated3, $rated4, $rated5,
-        $ratingAvgCnt, $ratingTotCnt, $ratingAvg, $memberReviewCnt) =
+    [$rated1, $rated2, $rated3, $rated4, $rated5,
+        $ratingAvgCnt, $ratingTotCnt, $ratingAvg, $memberReviewCnt] =
         mysql_fetch_row($result);
 
-    $ratingHisto = array(0, 0, 0, 0, 0, 0);
+    $ratingHisto = [0, 0, 0, 0, 0, 0];
     $ratingHisto[1] = $rated1;
     $ratingHisto[2] = $rated2;
     $ratingHisto[3] = $rated3;
@@ -413,7 +389,7 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
         $pubFull = date("F j, Y", strtotime($published));
 
     // build the information into a giant array
-    return array($ifids, $title, $author, $authorExt,
+    return [$ifids, $title, $author, $authorExt,
                  $pubYear, $pubFull, $license,
                  $system, $desc, $rawDesc,
                  $hasart, $genre, $seriesname, $seriesnum,
@@ -426,7 +402,51 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
                  $moddatelatest,
                  $historyView,
                  $dlnotes, $extReviews, $extRevDisplayRank,
-                 $ratingHisto, $xrefs, $inrefs, $flags);
+                 $ratingHisto, $xrefs, $inrefs, $flags];
+}
+
+// ----------------------------------------------------------------------------
+//
+// Apply reverse deltas from games_history onto a current-version record
+// until the history row for $targetVersion has been applied.  History is
+// walked newest to oldest.  Returns [found, updatedRecord].
+//
+// $afterRow, if provided, is called as (&$rec, $historyRow, $deltas) after
+// each history row's deltas are merged — e.g. to copy moddate or update
+// derived fields like hasart.
+//
+function applyGameHistoryDeltas($db, $id, array $rec, $targetVersion,
+                                $afterRow = null)
+{
+    $targetVersion = (int)$targetVersion;
+    $result = mysqli_execute_query($db,
+        "select
+            pagevsn, deltas,
+            concat(date_format(moddate, '%e %M %Y at %l:%i'),
+                   lower(date_format(moddate, '%p'))) as moddate,
+            date_format(moddate, '%d-%b-%Y %H:%i') as moddate2
+         from games_history
+         where id = ?
+         order by pagevsn desc", [$id]);
+    if (!$result)
+        return [false, $rec];
+
+    $found = false;
+    while ($vrec = mysql_fetch_array($result, MYSQL_ASSOC)) {
+        $deltas = unserializeGameDeltas($vrec['deltas']);
+        foreach ($deltas as $colname => $colval)
+            $rec[$colname] = $colval;
+
+        if ($afterRow)
+            $afterRow($rec, $vrec, $deltas);
+
+        if ((int)$vrec['pagevsn'] == $targetVersion) {
+            $found = true;
+            break;
+        }
+    }
+
+    return [$found, $rec];
 }
 
 // ----------------------------------------------------------------------------
@@ -435,33 +455,46 @@ function getGameInfo($db, $id, $curuser, $requestVersion, &$errMsg, &$errCode)
 // get a description of the changes made as a comma-separated list of
 // column names
 //
+function unserializeGameDeltas($deltas)
+{
+    if (!is_string($deltas) || $deltas === '') {
+        return [];
+    }
+    $parsed = @unserialize($deltas);
+    return is_array($parsed) ? $parsed : [];
+}
+
 function getDeltaDesc($deltas)
 {
+    if (!is_array($deltas)) {
+        return "";
+    }
+
     // columns -> descriptions
-    $deltaDesc = array("title" => "title",
-                       "author" => "author",
-                       "authorExt" => "author",
-                       "published" => "publication date",
-                       "version" => "version number",
-                       "license" => "license type",
-                       "system" => "development system",
-                       "language" => "language",
-                       "desc" => "description",
-                       "coverart" => "cover art",
-                       "genre" => "genre",
-                       "seriesname" => "series name",
-                       "seriesnumber" => "episode number",
-                       "forgiveness" => "forgiveness",
-                       "bafsid" => "Baf's Guide ID",
-                       "website" => "Web site URL",
-                       "nodownloadreason" => "no-download explanation",
-                       "ifids" => "IFIDs",
-                       "links" => "download links",
-                       "xrefs" => "cross-references",
-                       "extreviews" => "external review links");
+    $deltaDesc = ["title" => "title",
+        "author" => "author",
+        "authorExt" => "author",
+        "published" => "publication date",
+        "version" => "version number",
+        "license" => "license type",
+        "system" => "development system",
+        "language" => "language",
+        "desc" => "description",
+        "coverart" => "cover art",
+        "genre" => "genre",
+        "seriesname" => "series name",
+        "seriesnumber" => "episode number",
+        "forgiveness" => "forgiveness",
+        "bafsid" => "Baf's Guide ID",
+        "website" => "Web site URL",
+        "nodownloadreason" => "no-download explanation",
+        "ifids" => "IFIDs",
+        "links" => "download links",
+        "xrefs" => "cross-references",
+        "extreviews" => "external review links"];
 
     // build an array keyed by the descriptive names of the columns
-    $changeList = array();
+    $changeList = [];
     foreach ($deltas as $colname => $colval) {
         if (isset($deltaDesc[$colname]) && $deltaDesc[$colname] != "")
             $changeList[$deltaDesc[$colname]] = true;

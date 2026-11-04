@@ -40,7 +40,7 @@ function getReviewQuery($db, $where)
         // get my sandbox
         $mysandbox = 0;
         $result = mysql_query("select sandbox from users where id='$curuser'", $db);
-        list($mysandbox) = mysql_fetch_row($result);
+        [$mysandbox] = mysql_fetch_row($result);
         if ($mysandbox != 0)
             $sandbox = "(0,$mysandbox)";
     }
@@ -61,7 +61,7 @@ function getReviewQuery($db, $where)
     // as formatted for display, also to faciliate sorting.
     return
         "select sql_calc_found_rows
-           reviews.id as reviewid, rating, summary, review,
+           reviews.id as reviewid, rating, summary, review, moddate,
            date_format(greatest(reviews.moddate, ifnull(embargodate, cast(0 as datetime))), '%M %e, %Y') as moddatefmt,
            greatest(reviews.createdate, ifnull(embargodate, cast(0 as datetime))) as publicationdate,
            date_format(greatest(reviews.createdate, ifnull(embargodate, cast(0 as datetime))), '%M %e, %Y') as publicationdatefmt,
@@ -270,16 +270,20 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
     $qreviewid = mysql_real_escape_string($reviewid, $db);
     $rating = $rec['rating'];
     $summary = htmlspecialcharx($rec['summary']);
-    $review = fixDesc($rec['review'], FixDescSpoiler);
-    $publicationdate = $rec['publicationdatefmt'];
-    $moddate = $rec['moddatefmt'];
+    if (strcmp($rec['moddate'], '2025-08-30') < 0) {
+        $review = fixDesc($rec['review'], FixDescSpoiler | FixDescDemoteHeadings);
+    } else {
+        $review = fixDesc(parsedownMultilineText($rec['review']), FixDescSpoiler | FixDescDemoteHeadings);
+    }
+    $publicationdate = $rec['publicationdatefmt'] ?? '';
+    $moddatefmt = $rec['moddatefmt'] ?? '';
     $lastupdateFootnote = null;
-    if ($moddate && $publicationdate != $moddate) {
+    if ($moddatefmt && $publicationdate != $moddatefmt) {
         // Rating-only review
         if ($review == "") {
-            $publicationdate .= " (last edited on $moddate)";
+            $publicationdate .= " (last edited on $moddatefmt)";
         } else {
-            $lastupdateFootnote = "This review was last edited on $moddate";
+            $lastupdateFootnote = "This review was last edited on $moddatefmt";
             $publicationdate .= "<span title=\"$lastupdateFootnote\">*</span>";
         }
     }
@@ -288,13 +292,13 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
     $userid = $rec['userid'];
     $username = htmlspecialcharx($rec['username']);
     $location = htmlspecialcharx($rec['location']);
-    $helpful = $rec['helpful'];
-    $unhelpful = $rec['unhelpful'];
+    $helpful = $rec['helpful'] ?? 0;
+    $unhelpful = $rec['unhelpful'] ?? 0;
     $totalvotes = $helpful + $unhelpful;
-    $flags = $rec['flags'];
+    $flags = $rec['flags'] ?? '';
     $spoilerFlag = (strpos($flags, "S") !== false);
-    $oldVersion = ($rec['RFlags'] & RFLAG_OLD_VERSION);
-    $omitAvg = ($rec['RFlags'] & RFLAG_OMIT_AVG);
+    $oldVersion = (($rec['RFlags'] ?? 0) & RFLAG_OLD_VERSION);
+    $omitAvg = (($rec['RFlags'] ?? 0) & RFLAG_OMIT_AVG);
 
     // fetch the review tags
     $tags = queryReviewTags($db, $reviewid);
@@ -311,7 +315,7 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
         $result = mysql_query(
             "select url, sourcename, sourceurl from extreviews
              where reviewid = '$qreviewid'", $db);
-        list($xurl, $xsrc, $xsrcurl) = mysql_fetch_row($result);
+        [$xurl, $xsrc, $xsrcurl] = mysql_fetch_row($result);
         $xsrc = htmlspecialcharx($xsrc);
     }
 
@@ -432,7 +436,7 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
     }
 
     // set up the comment controls, if applicable
-    $commentCtls = $barCommentCtl = "";
+    $commentCtls = $barCommentCtls = "";
     if ($showCommentCtls
         && ($curuser == $userid || ($dfltComments && $showVoteCtls))) {
 
@@ -446,25 +450,29 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
         }
 
         // set up the <a href> for adding a comment
-        $addCommentLink = "<a href=\"reviewcomment?review=$reviewid\">";
+        $addCommentLink = "<a title=\"Comment on this review\" "
+            . "href=\"reviewcomment?review=$reviewid\">";
 
         // generate the controls, depending on the existing comment count
         if ($commentCount == 0) {
-            $commentCtls = "{$addCommentLink}Add a comment</a>";
+            if ($curuser) {
+                $commentCtls = "{$addCommentLink}Add a comment</a>";
+            }
         } else {
-            $commentCtls =
-                "<a href=\"viewgame?id=$gameid&review=$reviewid#comments\">"
-                . "View comments ($commentCount)</a> - "
-                . "{$addCommentLink}Add comment</a>";
+            $commentCtls = "<a title=\"Direct link to comments\" "
+                . "href=\"viewgame?id=$gameid&review=$reviewid#comments\">"
+                . "View comments ($commentCount)</a>";
         }
 
-        $barCommentCtls = "| $commentCtls";
+        if ($commentCtls) {
+            $barCommentCtls = "| $commentCtls";
+        }
     }
 
     // add any special notes
     if ($oldVersion || $omitAvg) {
 
-        $notes = array();
+        $notes = [];
         if ($oldVersion)
             $notes[] = "this review is based on older version of the game";
         if ($omitAvg)
@@ -479,15 +487,18 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
     if ($curuser == $userid) {
 
         echo "<div class=smallfoot><span class=details>
+               <a title=\"Direct link to this review\"
+               href=\"viewgame?id=$gameid&review=$reviewid\">Direct link</a>
+               $barCommentCtls | 
                <i>You wrote this review -
                <a href=\"review?id=$gameid&userid=$userid\">Revise it</a></i>
-               | <a href=\"viewgame?id=$gameid&review=$reviewid\">Direct link</a> $barCommentCtls</span></div>";
+               </span></div>";
 
     } else if ($specialCode == 'external') {
 
         if ($xurl)
-            echo "<span class=details>"
-                . "<a href=\"$xurl\">See the full review</a></span><br>";
+            echo "<span class=details>
+                  <a href=\"$xurl\">See the full review</a></span><br>";
 
     } else if (!$isSpecial && $showVoteCtls) {
 
@@ -502,13 +513,16 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
         }
         global $nonce;
 
-        echo "<div class=smallfoot><span class=details>";
+        echo "<div class=smallfoot><span class=details>
+            <a href=\"viewgame?id=$gameid&review=$reviewid\" 
+            title=\"Direct link to this review\">Direct link</a> 
+            $barCommentCtls | ";
 
         if (!$curuser) {
-            echo "You can <a href=\"login?dest=viewgame%3Fid%3D$gameid%26review%3D$reviewid\">log in</a> "
-               . "to rate this review, mute this user, or add a comment.";
+            echo "<a href=\"login?dest=viewgame%3Fid%3D$gameid%26review%3D$reviewid\">Log in</a> "
+               . "to comment, rate this review, or mute this user.";
         } else {
-            echo "Was this review helpful to you? &nbsp; "
+            echo "Was this review helpful? &nbsp; "
                 . "<a href=\"needjs\">"
                 . addEventListener('click', "sendReviewVote('$reviewid', 'Y'); return false;")
                 . "Yes</a> &nbsp; "
@@ -557,9 +571,6 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
                 . "title=\"Notify moderators that this review violates "
                 . "the community guidelines\"><nobr>Flag as inappropriate</nobr></a>"
                 . "</td></tr>"
-                . "<tr><td><a href=\"viewgame?id=$gameid&review=$reviewid\" "
-                . "title=\"Direct link to this review\"><nobr>Direct link</nobr></a>"
-                . "</td></tr>"
                 . "<tr class='reviews__separator'><td></td></tr>"
                 . "<tr><td><a href=\"userfilter?list\">"
                 . "<nobr>View my user filters</nobr></a>"
@@ -571,7 +582,6 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
                 . "</div>"
                 . "</div>"
 
-                . "&nbsp;$barCommentCtls"
                 . "&nbsp;<span id=\"voteMsg_$reviewid\" class=\"xmlstatmsg\">"
                 . "</span><span id=\"voteStat_$reviewid\"></span>"
                 . "<script type=\"text/javascript\" nonce=\"$nonce\">\r\n<!--\r\n"
@@ -582,8 +592,15 @@ function showReview($db, $gameid, $rec, $specialNames, $optionFlags = 0)
         echo "</span></div>";
 
     } else if ($specialCode == 'author' || $specialCode == 'ifdb') {
-        echo "<div class=smallfoot><span class=details>$commentCtls"
-            . "</span></div>";
+        echo "<div class=smallfoot><span class=details>
+            <a title=\"Direct link to this review\"
+            href=\"viewgame?id=$gameid&review=$reviewid\">Direct link</a>
+            $barCommentCtls";
+        if (!$curuser && $showCommentCtls && $showVoteCtls) {
+            echo " | <a href=\"login?dest=viewgame%3Fid%3D$gameid%26review%3D$reviewid\">Log in</a> "
+                . "to comment.";
+        }
+        echo "</span></div>";
     }
 
 

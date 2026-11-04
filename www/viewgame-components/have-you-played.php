@@ -58,7 +58,7 @@ function updateUnwishList(id, stat)
         $result = mysqli_execute_query($db,
             "select count(*) from crossrecs
              where userid = ? and fromgame = ?", [$curuser, $id]);
-        list($myCrossRecs) = mysql_fetch_row($result);
+        [$myCrossRecs] = mysql_fetch_row($result);
     }
 
     initStarControls();
@@ -172,6 +172,7 @@ function updateUnwishList(id, stat)
 <p id='timeSubmittedMessage'>Your time has been submitted.</p>
 </div>
 
+</div></div>
 
 <script nonce="<?php global $nonce; echo $nonce; ?>">
 

@@ -1,9 +1,13 @@
-FROM composer:2 as builder
+# Default is the unpinned minor (php:8-apache) for local compose.
+# docker-compose.prod.yml passes PHP_VERSION=8.3.
+ARG PHP_VERSION=8
+
+FROM composer:2 AS builder
 WORKDIR /app
 COPY composer.json composer.lock ./
 RUN composer install --no-dev --optimize-autoloader --no-interaction
 
-FROM php:7-apache as web
+FROM php:${PHP_VERSION}-apache AS web
 
 RUN docker-php-ext-install mysqli
 RUN apt-get update -y && apt-get install -y zlib1g-dev libpng-dev libjpeg-dev

@@ -1,6 +1,7 @@
 <?php
 
 include_once "pagetpl.php";
+include_once "gameinfo.php";
 
 // --------------------------------------------------------------------------
 //
@@ -266,7 +267,7 @@ function loadGameRecord($db, $id)
     $rec['coverart'] = (is_null($art) || strlen($art) == 0 ? "none" : "old");
 
     // return the result
-    return [$rec, false];
+    return [$rec, false, false];
 }
 
 
@@ -324,11 +325,11 @@ function saveUpdates($db, $adminPriv, $apiMode,
     // since we started working - we have the tables locked now, so there's
     // no change of a race condition from this point forward
     if ($id != "new")
-        list($rec, $errMsg) = loadGameRecord($db, $id);
+        [$rec, $errMsg] = loadGameRecord($db, $id);
 
     // strip whitespace from the IFID field, and uppercase it
     $req['ifids'] = strtoupper(str_replace(
-        [" ", "\t"], ["", ""], $req['ifids']));
+        [" ", "\t"], ["", ""], $req['ifids'] ?? ''));
 
     // If there are any profile links in the author name, we actually have
     // an EXTENDED author value.  In this case, set the extended author to
@@ -349,7 +350,7 @@ function saveUpdates($db, $adminPriv, $apiMode,
     }
 
     // calculate the list of changes
-    list ($changesOld, $changesNew) = calcDeltas($rec, $req);
+    [$changesOld, $changesNew] = calcDeltas($rec, $req);
 
     // get the database column definitions
     $result = mysql_query("describe games", $db);
@@ -529,8 +530,7 @@ function saveUpdates($db, $adminPriv, $apiMode,
             if ($fmt == "") {
                 $errDetail["links"][] =
                     "You must select a file type for each link.";
-            }
-            if ($fmtmap[$fmt][1] == 'X' && $os == "") {
+            } else if (isset($fmtmap[$fmt]) && $fmtmap[$fmt][1] == 'X' && $os == "") {
                 $errDetail["links"][] =
                     "You must select the operating system for an Application
                      or Installer link.";
@@ -761,6 +761,9 @@ function parseDateOrYearVal($val)
     // do the normal date parse
     $d = parseDateVal($val);
 
+    if ($d === null || $d === false)
+        return "";
+
     // if the value doesn't look like just a year value, add the time portion
     if (!preg_match("/[0-9][0-9][0-9][0-9]$/AD", $val))
         $d .= " 01:00:00";
@@ -802,8 +805,8 @@ function calcDeltas($oldRec, $newRec)
         $colname = $field[1];
 
         // get the old and new values
-        $oldval = (isset($oldRec[$colname]) ? $oldRec[$colname] : "");
-        $newval = $newRec[$colname];
+        $oldval = $oldRec[$colname] ?? "";
+        $newval = $newRec[$colname] ?? "";
 
         // skip derived values
         if ($colname == "eAuthor")
@@ -863,6 +866,20 @@ function calcDeltas($oldRec, $newRec)
                 if ($oldval == "none")
                     $oldval = "";
             }
+            else if (is_string($newval) && strncmp($newval, "id:", 3) == 0)
+            {
+                // Restore an existing image by ID (used for version rollback).
+                // The value after the "id:" prefix is the stored image ID.
+                $newval = substr($newval, 3);
+                $oldKey = 'orig:' . $colname;
+                $oldval = isset($oldRec[$oldKey]) ? $oldRec[$oldKey] : "";
+                if ((string)$newval === (string)$oldval)
+                {
+                    // same image - no change
+                    $newval = false;
+                    $oldval = false;
+                }
+            }
             else
             {
                 // no change to the image
@@ -896,32 +913,32 @@ function calcDeltas($oldRec, $newRec)
     }
 
     // check for changes to the links
-    $newlinks = $newRec['links'];
-    $oldlinks = (isset($oldRec['links']) ? $oldRec['links'] : []);
+    $newlinks = $newRec['links'] ?? [];
+    $oldlinks = $oldRec['links'] ?? [];
     if (!arrayOfArrayValsEqual(
         $newlinks, $oldlinks,
         ['url', 'title', 'desc', 'attrs', 'fmtid', 'osid', 'osvsn',
-         'compression', 'compressedprimary'])) {
+            'compression', 'compressedprimary'])) {
         // they don't match - add to the change lists
         $changesOld['links'] = $oldlinks;
         $changesNew['links'] = $newlinks;
     }
 
     // check for changes to the external reviews
-    $newrevs = $newRec['extreviews'];
-    $oldrevs = (isset($oldRec['extreviews']) ? $oldRec['extreviews'] : []);
+    $newrevs = $newRec['extreviews'] ?? [];
+    $oldrevs = $oldRec['extreviews'] ?? [];
     if (!arrayOfArrayValsEqual(
         $newrevs, $oldrevs,
         ['url', 'sourcename', 'sourceurl', 'rating',
-         'headline', 'summary'])) {
+            'headline', 'summary'])) {
         // they don't match - add to the change lists
         $changesOld['extreviews'] = $oldrevs;
         $changesNew['extreviews'] = $newrevs;
     }
 
     // check for changes to the external references
-    $newxrefs = $newRec['xrefs'];
-    $oldxrefs = (isset($oldRec['xrefs']) ? $oldRec['xrefs'] : []);
+    $newxrefs = $newRec['xrefs'] ?? [];
+    $oldxrefs = $oldRec['xrefs'] ?? [];
     if (!arrayOfArrayValsEqual(
         $newxrefs, $oldxrefs, ['reftype', 'toID'])) {
 
@@ -933,10 +950,15 @@ function calcDeltas($oldRec, $newRec)
     // if we're updating the IFID list, represent this as an array
     if (isset($changesNew['ifids']))
     {
-        // turn the IFID lists into arrays
-        if (isset($changesOld['ifids']) && $changesOld['ifids'] != "")
+        // turn the IFID lists into arrays (empty string -> [])
+        if (!isset($changesOld['ifids']) || $changesOld['ifids'] === "")
+            $changesOld['ifids'] = [];
+        else if (is_string($changesOld['ifids']))
             $changesOld['ifids'] = explode(",", $changesOld['ifids']);
-        if (isset($changesNew['ifids']) && $changesNew['ifids'] != "")
+
+        if ($changesNew['ifids'] === "")
+            $changesNew['ifids'] = [];
+        else if (is_string($changesNew['ifids']))
             $changesNew['ifids'] = explode(",", $changesNew['ifids']);
     }
 
@@ -1070,7 +1092,7 @@ function update_profile_links($db, $qgameid, $plNew, &$progress)
     // query the old profile links
     $result = mysql_query("select userid from gameprofilelinks where gameid = '$qgameid'", $db);
     for ($i = 0, $n = mysql_num_rows($result), $plOldTab = [] ; $i < $n ; $i++) {
-        list($p) = mysql_fetch_row($result);
+        [$p] = mysql_fetch_row($result);
         $plOldTab[$p] = true;
     }
 
@@ -1135,7 +1157,7 @@ function saveNewGame($db, $adminPriv, $apiMode,
 
         // if the author field is empty but the external version isn't,
         // it means that the {TUID} formatting was missing the display names
-        if ($col == "author" && $changesNew["authorExt"] != "") {
+        if ($col == "author" && ($changesNew["authorExt"] ?? "") != "") {
             $colErr = "Please be sure to enter the author's display name "
                       . "before each profile link.  Use the format "
                       . "<b>Author Dent {a10x00139ke9041j}</b>.";
@@ -1360,7 +1382,7 @@ function saveOldGame($db, $adminPriv, $apiMode,
     // presume success
     $result = true;
 
-    // note the page version in the *current* record
+    // note the page version in the current record
     $pagevsn = $rec['pagevsn'];
 
     // If the page version has changed since we originally loaded the page,
@@ -1384,21 +1406,9 @@ function saveOldGame($db, $adminPriv, $apiMode,
 
         // apply history records from latest to oldest until we get back
         // to the version we've been editing
-        $curvsn = (int)$origRec['pagevsn'];
         $origvsn = (int)$_REQUEST['pagevsn'];
-        $result = mysql_query(
-            "select deltas from games_history
-             where id = '$qid'
-               and pagevsn between $origvsn and $curvsn - 1
-               order by pagevsn desc", $db);
-        for ($i = 0 ; $i < mysql_num_rows($result) ; $i++) {
-            // retrieve and unserialize the deltas
-            $dg = unserialize(mysql_result($result, 0, "deltas"));
-
-            // apply the deltas
-            foreach ($dg as $col => $val)
-                $origRec[$col] = $val;
-        }
+        [, $origRec] = applyGameHistoryDeltas(
+            $db, $id, $origRec, $origvsn);
 
         // put things back in our internal format
         $origRec['ifids'] = implode(",", $origRec['ifids']);
@@ -1409,11 +1419,11 @@ function saveOldGame($db, $adminPriv, $apiMode,
 
         // calculate the deltas between the ORIGINAL and NEW database
         // versions - this tells us what the OTHER user changes
-        list ($dbChangesOld, $dbChangesNew) = calcDeltas($origRec, $rec);
+        [$dbChangesOld, $dbChangesNew] = calcDeltas($origRec, $rec);
 
         // calculate the deltas between the ORIGINAL database version
         // and our EDITED version - this tells us what WE changed
-        list ($editChangesOld, $editChangesNew) = calcDeltas($origRec, $req);
+        [$editChangesOld, $editChangesNew] = calcDeltas($origRec, $req);
 
         // Now find out what we changed, what the other user changed, and
         // what we both changed:
@@ -1444,13 +1454,11 @@ function saveOldGame($db, $adminPriv, $apiMode,
             if ($apiMode) {
                 $saveErrMsg = "An update conflict occurred. Another user "
                               . "submitted changes while your request "
-                              . "was being processed. Please view the "
-                              . "listing via the IFDB Web site. You can "
-                              . "then make changes manually if you wish.";
+                              . "was being processed.";
                 $saveErrCode = "CannotMerge";
             } else {
                 $saveErrMsg =
-                    "<b>Update Conflict!</b> Another user saved changes to this "
+                    "<b>Update Conflict</b> Another user saved changes to this "
                     . "game while you were working on your changes. You both "
                     . "changed some of the same items, which are flagged "
                     . "below. We recommend that you look at the "
@@ -1464,10 +1472,10 @@ function saveOldGame($db, $adminPriv, $apiMode,
             // this counts as a failure
             $result = false;
 
-            // our base version for the next attempted save is the *new*
+            // our base version for the next attempted save is the new
             // version that we just compared against - if they Save again
             // now that they've been warned, we want to proceed with the
-            // update (unless, of course, *another* concurrent update
+            // update (unless, of course, another concurrent update
             // occurs in the meantime)
             $req['pagevsn'] = $pagevsn;
         }
@@ -1526,7 +1534,7 @@ function saveOldGame($db, $adminPriv, $apiMode,
 
         // the variable list might be empty after all of that,
         // because there are some fields that don't go directly
-        // in the main table - send the update only if we
+        // in the main table. Send the update only if we
         // actually have columns to update
         if ($varlist != "") {
             // send the update
@@ -1649,6 +1657,115 @@ function saveOldGame($db, $adminPriv, $apiMode,
 
     // return success/failure indication
     return $result;
+}
+
+// --------------------------------------------------------------------------
+//
+// Load a game record as it existed at a given page version.  Returns the
+// same shape as loadGameRecord(), with coverart/eAuthor/ifids normalized
+// for use as a saveUpdates() request.  $reqPageVsn is set to the current
+// page version so that saveUpdates can treat this as an edit of the
+// latest base version.
+//
+function loadGameRecordAtVersion($db, $id, $version)
+{
+    // start with the current record
+    [$rec, $errMsg, $errMsgShort] = loadGameRecord($db, $id);
+    if (!$rec)
+        return [false, $errMsg, $errMsgShort];
+
+    $currentVsn = (int)$rec['pagevsn'];
+    $targVsn = (int)$version;
+
+    if ($targVsn < 1 || $targVsn > $currentVsn)
+        return [false,
+                "The requested version wasn't found in the database.",
+                "versionNotFound"];
+
+    // remember the current cover art ID so we can express the target
+    // cover art in form terms ("old" / "none" / "id:...")
+    $currentCoverArt = $rec['orig:coverart'];
+
+    // Required listing fields: some legacy history rows store null for
+    // title/author (invalid under the current schema). Keep the current
+    // values as fallbacks so rollback can still save other restored fields.
+    $fallbackTitle = $rec['title'] ?? "";
+    $fallbackAuthor = $rec['author'] ?? "";
+    $fallbackAuthorExt = $rec['authorExt'] ?? "";
+
+    // work with the raw cover-art ID while applying history deltas
+    $rec['coverart'] = $currentCoverArt;
+
+    // if they want the current version, we're already done reconstructing
+    if ($targVsn != $currentVsn) {
+        [$foundvsn, $rec] = applyGameHistoryDeltas($db, $id, $rec, $targVsn);
+        if (!$foundvsn)
+            return [false,
+                    "The requested version wasn't found in the database.",
+                    "versionNotFound"];
+    }
+
+    // Normalize IFIDs to the comma-separated form saveUpdates expects.
+    // History deltas may store ifids as an array or as a string.
+    if (isset($rec['ifids']) && is_array($rec['ifids'])) {
+        $rec['ifid array'] = $rec['ifids'];
+        $rec['ifids'] = implode(",", $rec['ifids']);
+    } else if (!isset($rec['ifids']) || $rec['ifids'] === "") {
+        $rec['ifids'] = "";
+        $rec['ifid array'] = [];
+    } else if (is_string($rec['ifids'])) {
+        $rec['ifid array'] = array_values(array_filter(
+            explode(",", $rec['ifids']), function ($x) { return $x !== ""; }));
+    }
+
+    // Normalize cover art: compare the reconstructed image ID against
+    // the current one and express the result in form terms
+    $targetArt = $rec['coverart'] ?? null;
+    if (is_null($targetArt) || $targetArt === "") {
+        $rec['orig:coverart'] = "";
+        $rec['coverart'] = "none";
+    } else if ((string)$targetArt === (string)$currentCoverArt) {
+        $rec['orig:coverart'] = $currentCoverArt;
+        $rec['coverart'] = "old";
+    } else {
+        // restore a different existing image by ID
+        $rec['orig:coverart'] = $targetArt;
+        $rec['coverart'] = "id:" . $targetArt;
+    }
+
+    // Coerce null scalars from legacy deltas to empty strings
+    foreach (['title', 'author', 'authorExt', 'published', 'version',
+              'license', 'system', 'language', 'desc', 'genre',
+              'seriesname', 'seriesnumber', 'forgiveness', 'website',
+              'downloadnotes'] as $col) {
+        if (array_key_exists($col, $rec) && $rec[$col] === null)
+            $rec[$col] = "";
+    }
+
+    // Required fields: if history reconstructed them as empty, keep the
+    // current listing values so saveUpdates validation can succeed.
+    if ($rec['title'] === "")
+        $rec['title'] = $fallbackTitle;
+    if ($rec['author'] === "" && $rec['authorExt'] === "") {
+        $rec['author'] = $fallbackAuthor;
+        $rec['authorExt'] = $fallbackAuthorExt;
+    }
+
+    // author display field used by the edit form / saveUpdates
+    $rec['eAuthor'] = $rec['authorExt'] ? $rec['authorExt'] : ($rec['author'] ?? "");
+
+    // ensure array fields exist
+    if (!isset($rec['links']) || !is_array($rec['links']))
+        $rec['links'] = [];
+    if (!isset($rec['extreviews']) || !is_array($rec['extreviews']))
+        $rec['extreviews'] = [];
+    if (!isset($rec['xrefs']) || !is_array($rec['xrefs']))
+        $rec['xrefs'] = [];
+
+    // saveUpdates concurrency check: claim we're editing the current base
+    $rec['pagevsn'] = $currentVsn;
+
+    return [$rec, false, false];
 }
 
 ?>

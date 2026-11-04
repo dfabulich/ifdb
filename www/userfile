@@ -66,7 +66,12 @@ if (preg_match("/^css\/ifdb\.css$/", $fname, $match)) {
     // treat this as a root directory image item
     header("Content-Type: image/{$match[2]}");
     header("Last-Modified: $itimeStr");
-    readfile($match[1]);
+    $img = $match[1];
+    $path = is_file("img/$img") ? "img/$img" : $img;
+    if (!is_file($path)) {
+        err404();
+    }
+    readfile($path);
     exit();
 
 } else if (preg_match("/^css\/(.+)\.css$/", $fname, $match)) {
@@ -79,7 +84,7 @@ if (preg_match("/^css\/ifdb\.css$/", $fname, $match)) {
          where userid = '$userid' and stylesheetid = '$ssid'", $db);
     if (mysql_num_rows($result) != 0) {
         // fetch the row
-        list($contents, $mtime) = mysql_fetch_row($result);
+        [$contents, $mtime] = mysql_fetch_row($result);
 
         // use the later of the stylesheet modified time or the ifdb.css
         // modified time, since it might include ifdb.css
@@ -103,7 +108,7 @@ if (preg_match("/^css\/ifdb\.css$/", $fname, $match)) {
     if (mysql_num_rows($result) != 0) {
         $pic = mysql_result($result, 0, "picture");
         $ret = fetch_image($pic, true);
-        if ($ret) {
+        if ($ret[0] !== null) {
             sendImage($ret[0], $ret[1], null, SIF_RAW);
             exit();
         }

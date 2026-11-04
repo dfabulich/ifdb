@@ -64,7 +64,7 @@
                          from $gameRatingsView
                          where gameid = '$crid'", $db);
                     if ($result)
-                        list($crravg, $crrcnt, $crrtot) =
+                        [$crravg, $crrcnt, $crrtot] =
                             mysql_fetch_row($result);
                     else
                         $crravg = $crrcnt = $crrtot = 0;
@@ -73,7 +73,7 @@
                     if ($crart)
                         echo "<table class=grid cellspacing=0 cellpadding=0 "
                             . "border=0><tr><td>"
-                            . "<a href=\"viewgame?id=$crid\">"
+                            . "<a href=\"viewgame?id=$crid\" aria-hidden=\"true\" tabindex=\"-1\">"
                             . coverArtThumbnail($crid, 80, $crversion)
                             . "</a></td><td>";
 

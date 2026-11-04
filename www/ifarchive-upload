@@ -19,20 +19,21 @@ pageHeader("IF Archive File Upload", false, false);
 $db = dbConnect();
 $result = mysql_query(
     "select name, email from users where id = '$userid'", $db);
-list($username, $email) = mysql_fetch_row($result);
+[$username, $email] = mysql_fetch_row($result);
 $title = get_req_data("title");
 $system = get_req_data("system");
 $license = get_req_data("license");
 $author = get_req_data("author");
 $version = get_req_data("version");
-$fmtmap = array(
+$fmtmap = [
     "TADS 2" => "tads2", "TADS 3" => "tads3",
     "Inform 6" => "zcode", "Inform 7" => "zcode",
     "ADRIFT" => "adrift", "AdvSys" => "advsys", "AGT" => "agt",
     "Alan" => "alan2", "Alan 3" => "alan3",
-    "Hugo" => "hugo");
+    "Hugo" => "hugo"];
 
-$fmt = $fmtmap[$system];
+$fmt = $fmtmap[$system] ?? '';
+$os = get_req_data("opsys");
 
 if ($author)
     $author = preg_replace("/\{[a-z0-9]+\}/i", "", $author);
@@ -59,7 +60,7 @@ for ($rowcnt = mysql_num_rows($result), $fmts = false, $i = 0 ;
      $i < $rowcnt ; $i++) {
     $f = mysql_fetch_row($result);
     $fmts[] = $f;
-    echo "\"${f[2]}\": \"{$f[0]}\", ";
+    echo "\"{$f[2]}\": \"{$f[0]}\", ";
 }
 echo "\" \": 0 };\r\n";
 
@@ -71,7 +72,7 @@ for ($rowcnt = mysql_num_rows($result), $oses = false, $i = 0 ;
      $i < $rowcnt ; $i++) {
     $o = mysql_fetch_row($result);
     $oses[] = $o;
-    echo "\"${o[2]}\": \"${o[0]}\", ";
+    echo "\"{$o[2]}\": \"{$o[0]}\", ";
 }
 echo "\" \": 0 };\r\n";
 
@@ -135,6 +136,9 @@ Archive</a> (ifarchive.org).  IFDB itself doesn't host any uploaded
 game files.  ifarchive.org is the leading repository of current and
 historical IF works, so most authors of new works like to upload their
 games there, to reach players and for historical preservation.</p>
+
+<p>This form is not to be used by automated agents. All uploads must be
+submitted by people.</p>
 
 <p><b>Before you upload:</b></p>
 
@@ -223,7 +227,7 @@ uploadForm.addEventListener('submit', function (event) {
         <option id="storyfile"<?php if (!$fmt) echo " selected";
         ?>>Please Select</option><?php
         foreach ($fmts as $f) {
-            list($fmtID, $fmtName, $fmtExt) = $f;
+            [$fmtID, $fmtName, $fmtExt] = $f;
             if ($f[3] == 'G' && $f[2] != 'storyfile') {
                 echo "<option value=\"$fmtExt\" ";
                 if ($fmtExt == $fmt)
@@ -244,7 +248,7 @@ uploadForm.addEventListener('submit', function (event) {
         <option id=""<?php if(!$os) echo " selected";
         ?>>Please Select</option><?php
         foreach ($oses as $o) {
-            list($osid, $osname, $osext, $ospri) = $o;
+            [$osid, $osname, $osext, $ospri] = $o;
             if ($osext != '*' && $ospri >= 0) {
                 echo "<option value=\"$osext\" ";
                 if ($osext == $os)
@@ -295,6 +299,10 @@ uploadForm.addEventListener('submit', function (event) {
          id="archiveDir" value="<?php echo $path ?>"/></td></tr>
 
   <tr><td align=right>Agreement:</td><td>&nbsp;</td>
+     <td><input type="checkbox" name="human" id="human">
+        <label for="human">I am a human being.</label>
+     </td></tr>
+  <tr><td></td><td>&nbsp;</td>
      <td><input type="checkbox" name="tos">I agree to the
         <a target="_blank" href="https://www.ifarchive.org/misc/license.html">IF Archive Terms of Use</a>
      </td></tr>

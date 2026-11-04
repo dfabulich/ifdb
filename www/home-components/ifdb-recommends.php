@@ -10,7 +10,7 @@ function sortBySortorder($a, $b)
 }
 
 
-$recs = array();
+$recs = [];
 $term = "";
 if ($loggedIn) {
     // If the user is logged in, don't recommend games the user already knows about
@@ -26,8 +26,8 @@ $override_game_filter = 0;
 
 
 // run the search for highly-rated games
-list($recs, $rowcnt, $sortList, $errMsg, $summaryDesc, $badges,
-    $specials, $specialsUsed, $orderBy, $games_were_filtered) =
+[$recs, $rowcnt, $sortList, $errMsg, $summaryDesc, $badges,
+    $specials, $specialsUsed, $orderBy, $games_were_filtered] =
     doSearch($db, $term, $searchType, $sortby, $limit, $browse, $count_all_possible_rows, $override_game_filter);
 
 $recs = array_values(array_filter($recs, function($r) {
@@ -62,7 +62,7 @@ if (count($recs) >= 2) {
         $author = collapsedAuthors($author);
         $hasart = $r['hasart'];
         $pagevsn = $r['pagevsn'];
-        list($summary, $len, $trunc) = summarizeHtml($r['description'], 140);
+        [$summary, $len, $trunc] = summarizeHtml($r['description'], 140);
         $summary = fixDesc($summary);
 
         // display the game information
@@ -70,7 +70,7 @@ if (count($recs) >= 2) {
         if ($hasart)
             echo "<table border=0 cellspacing=0 cellpadding=0>"
                 . "<tr valign=top><td>"
-                . "<a href=\"viewgame?id=$gameid\" class=\"ifdb-recommends__artLink\" aria-label=\"$title\">"
+                . "<a href=\"viewgame?id=$gameid\" class=\"ifdb-recommends__artLink\" aria-hidden=\"true\" tabindex=\"-1\">"
                 . coverArtThumbnail($gameid, 70, $pagevsn)
                 . "</a></td><td>";
 

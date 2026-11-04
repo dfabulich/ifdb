@@ -9,10 +9,13 @@
 <?php
 
 // get the latest competitions and competition news
-list($items, $game_filter_was_applied) = getNewItems($db, 7, NEWITEMS_COMPS | NEWITEMS_COMPNEWS);
+[$items, $game_filter_was_applied] = getNewItems($db, 7, NEWITEMS_COMPS | NEWITEMS_COMPNEWS);
 
 for ($idx = 0 ; $idx <= 7; $idx++)
 {
+    if (!isset($items[$idx])) {
+        break;
+    }
     // get this item
     [$pick, $rawDate, $row] = $items[$idx];
 

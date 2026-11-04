@@ -24,7 +24,7 @@ if (isset($_REQUEST['rss'])) {
            0, 20", $db);
 
     // use UTF-8 for RSS feeds
-    iconv_set_encoding("output_encoding", "UTF-8");
+    ini_set("default_charset", "utf-8");
 
     // send the RSS content-type header
     header("Content-Type: application/rss+xml");
@@ -73,9 +73,7 @@ if (isset($_REQUEST['rss'])) {
 $item = get_req_data('item');
 
 // get the requested page number
-$pg = get_req_data('pg');
-if ($pg < 1)
-    $pg = 1;
+[, $pg] = parse_page(get_req_data('pg'));
 
 // start the page
 pageHeader("New Features on IFDB");
@@ -132,9 +130,10 @@ $result2 = mysql_query("select found_rows()", $db);
 $lastPage = (int)floor(($totcnt + $perPage - 1)/$perPage);
 
 // set up the pagination control
+$pageCtl = "";
+$pageCtlBreak = "";
 if ($item) {
     // item query - no page controls are needed
-    $pageCtl = "";
 } else {
     $pageCtl = "<nav class=details>"
                . makePageControl(

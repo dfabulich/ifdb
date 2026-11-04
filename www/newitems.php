@@ -1,6 +1,7 @@
 <?php
 
 include_once "searchutil.php";
+require_once 'vendor/autoload.php';
 
 define("NEWITEMS_SITENEWS", 0x0001);
 define("NEWITEMS_GAMES", 0x0002);
@@ -22,15 +23,11 @@ define("NEWITEMS_ALLITEMS",
     | NEWITEMS_COMPNEWS
 );
 
-function getNewItems($db, $limit, $itemTypes = NEWITEMS_ALLITEMS, $options = [], $override_game_filter = 0)
+function getNewItems($db, $limit = 10, $itemTypes = NEWITEMS_ALLITEMS, $options = [])
 {
-    $days = $options['days'] ?? null;
-
-    // get the logged-in user
     checkPersistentLogin();
     $curuser = $_SESSION['logged_in_as'] ?? null;
 
-    // filter out muted users, if applicable
     $andNotMuted = "";
     if ($curuser) {
         $andNotMuted = "and (select count(*) from userfilters "
@@ -39,262 +36,483 @@ function getNewItems($db, $limit, $itemTypes = NEWITEMS_ALLITEMS, $options = [],
                          . "and filtertype = 'K') = 0";
     }
 
-    $override_game_filter = get_req_data('nogamefilter');
-
-    // So far, we have not applied a custom game filter
-    $game_filter_was_applied = 0;
-    
-    // Include only reviews from our sandbox or sandbox 0 (all users)
     $sandbox = "(0)";
-    if ($curuser)
-    {
-        // get my sandbox
-        $mysandbox = 0;
+    if ($curuser) {
         $result = mysql_query("select sandbox from users where id='$curuser'", $db);
-        list($mysandbox) = mysql_fetch_row($result);
+        [$mysandbox] = mysql_fetch_row($result);
         if ($mysandbox != 0)
             $sandbox = "(0,$mysandbox)";
     }
 
-    if ($limit) $limit++;
+    // Apply the user's saved game filter unless they opted out for this request.
+    // When no filter is active, keep the indexed home-page query paths from #1406.
+    $override_game_filter = get_req_data('nogamefilter');
+    $game_filter_was_applied = false;
+    if ($curuser && $override_game_filter != 1) {
+        $result = mysqli_execute_query($db, "select game_filter from users where id = ?", [$curuser]);
+        if ($result) {
+            [$gameFilter] = mysql_fetch_row($result);
+            if ($gameFilter) {
+                $game_filter_was_applied = true;
+                $options['apply_game_filter'] = true;
+            }
+        }
+    }
 
-    // start with an empty list
-    $items = array();
+    $limit++;
+    $offset = (int)($options['offset'] ?? 0);
 
-    $dayWhere = 1;
-    if ($days) $dayWhere = "d > date_sub(now(), interval $days day)";
+    $sources = newItemsSources($db, $options, $andNotMuted, $sandbox, $limit, $itemTypes);
+    $idQueries = [];
+    foreach ($sources as $src) {
+        if (!($itemTypes & $src['flag'])) {
+            continue;
+        }
+        $idQueries[] = $src['idQuery'];
+    }
+    if (!$idQueries) {
+        return [[], $game_filter_was_applied];
+    }
 
-    if ($itemTypes & NEWITEMS_SITENEWS) {
-        $sitenews_limit = $options['sitenews_limit'] ?? $limit;
-        if ($days) $dayWhere = "posted > date_sub(now(), interval $days day)";
-        // query site news
-        $result = mysql_query(
-            "select
-               itemid as sitenewsid, title, ldesc as `desc`,
-               posted as d,
-               date_format(posted, '%M %e, %Y') as fmtdate,
-               (now() < date_add(posted, interval 3 day)) as freshest
+    $result = mysql_query(
+        "select kind, d, id from (" . implode(" union all ", $idQueries) . ") as newitems
+         order by d desc
+         limit " . (int)$limit . " offset $offset", $db);
+    if (!$result) {
+        error_log(mysql_error($db));
+        return [[], $game_filter_was_applied];
+    }
+
+    $keys = [];
+    $idsByKind = [];
+    while ($row = mysql_fetch_array($result, MYSQL_ASSOC)) {
+        $id = (string)$row['id'];
+        $keys[] = [$row['kind'], $id, $row['d']];
+        $idsByKind[$row['kind']][] = $id;
+    }
+
+    $rowsByKind = [];
+    foreach ($sources as $src) {
+        $kind = $src['kind'];
+        if (empty($idsByKind[$kind])) {
+            continue;
+        }
+        $rowsByKind[$kind] = $src['hydrate']($db, $idsByKind[$kind], $andNotMuted, $sandbox);
+    }
+
+    $items = [];
+    foreach ($keys as [$kind, $id, $d]) {
+        $row = $rowsByKind[$kind][$id] ?? $rowsByKind[$kind][(int)$id] ?? null;
+        if (!$row) {
+            continue;
+        }
+        $pick = ($kind == 'NG' || $kind == 'NC') ? 'N' : $kind;
+        $items[] = [$pick, $row['d'] ?? $d, $row];
+    }
+
+    usort($items, "sortNewItemsByDate");
+    return [$items, $game_filter_was_applied];
+}
+
+// Use doSearch so a saved game filter is applied while still hitting indexed sorts.
+function newItemsFilteredGameIds($db, $sortby, $limit)
+{
+    $limit = max(1, (int)$limit);
+    [$rows] = doSearch($db, "", "game", $sortby, "limit $limit", 0, false, 0);
+    $ids = [];
+    foreach ($rows as $row) {
+        if (!empty($row['id'])) {
+            $ids[] = $row['id'];
+        }
+    }
+    return $ids;
+}
+
+function newItemsSqlIdList($db, $ids)
+{
+    $quoted = [];
+    foreach ($ids as $id) {
+        $quoted[] = "'" . mysql_real_escape_string((string)$id, $db) . "'";
+    }
+    return implode(",", $quoted);
+}
+
+function newItemsDayWhere($column, $days)
+{
+    if (!$days) {
+        return "1";
+    }
+    return "$column > date_sub(now(), interval " . (int)$days . " day)";
+}
+
+function newItemsKeyedRows($db, $sql, $idField)
+{
+    $rows = [];
+    $result = mysql_query($sql, $db);
+    if (!$result) {
+        error_log(mysql_error($db));
+        return $rows;
+    }
+    while ($row = mysql_fetch_array($result, MYSQL_ASSOC)) {
+        $rows[(string)$row[$idField]] = $row;
+    }
+    return $rows;
+}
+
+function newItemsHydrateNews($db, $ids, $sourceType, $sourceJoin, $sourceCols, $andNotMuted, $sandbox)
+{
+    if (!$ids) {
+        return [];
+    }
+    $anm = str_replace('#USERID#', 'n.userid', $andNotMuted);
+    $idList = newItemsSqlIdList($db, $ids);
+    $sql = "select
+               n.newsid as newsID,
+               n.created as d,
+               date_format(n.created, '%M %e, %Y') as createdFmt,
+               n.modified as modified,
+               date_format(n.modified, '%M %e, %Y') as modifiedFmt,
+               n.userid as userID, u.name as userName,
+               norig.userid as origUserID, uorig.name as origUserName,
+               n.headline as headline, n.body as body,
+               (u.picture is not null) as haspic,
+               $sourceCols
              from
-               sitenews
-             where $dayWhere
-             order by
-               d desc
-             limit $sitenews_limit", $db);
-        $sitenewscnt = mysql_num_rows($result);
-        for ($i = 0 ; $i < $sitenewscnt ; $i++) {
-            $row = mysql_fetch_array($result, MYSQL_ASSOC);
-            if ($i) $row['freshest'] = 0;
-            $items[] = array('S', $row['d'], $row);
-        }
-    }
-
-    if ($itemTypes & NEWITEMS_GAMES) {
-        $term = "";
-        if ($days) $term = "added:" . $days . "d-";
-        $searchType = "game";
-        $sortby = "lnew";
-        $games_limit = $options['games_limit'] ?? $limit;
-        $limit_clause = "limit $games_limit";
-        $browse = 0;        
-        // query the recent games
-        list($rows, $rowcnt, $sortList, $errMsg, $summaryDesc, $badges,
-         $specials, $specialsUsed, $orderBy) =
-         doSearch($db, $term, $searchType, $sortby, $limit_clause, $browse);
-        foreach ($rows as $row) {
-            $items[] = array('G', $row['createdate'], $row);
-        }
-    }
-
-    if ($itemTypes & NEWITEMS_LISTS) {
-        $lists_limit = $options['lists_limit'] ?? $limit;
-        if ($days) $dayWhere = "reclists.createdate > date_sub(now(), interval $days day)";
-        // query the recent recommended lists (minus muted users)
-        $anm = str_replace('#USERID#', 'reclists.userid', $andNotMuted);
-        $result = mysql_query(
-            "select
-               reclists.id as id, reclists.title as title,
-               reclists.`desc` as `desc`,
-               reclists.createdate as d,
-               date_format(reclists.createdate, '%M %e, %Y') as fmtdate,
-               count(reclists.id) as itemcnt,
-               reclists.userid, users.name as `username`,
-               (users.picture is not null) as haspic
-             from reclists
-               join reclistitems on reclistitems.listid=reclists.id
-               join users on users.id = reclists.userid
+               news as n
+               join users as u on u.id = n.userid
+               join news as norig on norig.newsid = ifnull(n.original, n.newsid)
+               join users as uorig on uorig.id = norig.userid
+               left outer join news as nsuper on nsuper.supersedes = n.newsid
+               $sourceJoin
              where
-               users.sandbox in $sandbox
-               and $dayWhere
-               $anm
-             group by reclists.id
-             order by reclists.createdate desc
-             limit $lists_limit", $db);
-        $listcnt = mysql_num_rows($result);
-        for ($i = 0 ; $i < $listcnt ; $i++) {
-            $row = mysql_fetch_array($result, MYSQL_ASSOC);
-            $items[] = array('L', $row['d'], $row);
+               n.source = '$sourceType'
+               and n.status = 'A'
+               and nsuper.newsid is null
+               and uorig.sandbox in $sandbox
+               and n.newsid in ($idList)
+               $anm";
+    $rows = newItemsKeyedRows($db, $sql, 'newsID');
+    foreach ($rows as &$row) {
+        $row['sourceType'] = $sourceType;
+    }
+    unset($row);
+    return $rows;
+}
+
+function newItemsSources($db, $options, $andNotMuted, $sandbox, $limit = 10,
+                          $itemTypes = NEWITEMS_ALLITEMS)
+{
+    $days = $options['days'] ?? null;
+    $ratingsView = getGameRatingsView($db);
+    $options += [
+        'games_limit' => (int)$limit + (int)($options['offset'] ?? 0),
+        'reviews_limit' => (int)$limit + (int)($options['offset'] ?? 0),
+    ];
+    $reviewsLimit = (int)$options['reviews_limit'];
+    $gamesLimit = (int)$options['games_limit'];
+    $slack = max($reviewsLimit * 3, $reviewsLimit + 16);
+    $applyGameFilter = !empty($options['apply_game_filter']);
+
+    // When a filter is active, find enough matching games first via indexed doSearch
+    // sorts, then constrain game-related new-item queries to those IDs. Without a
+    // filter, keep the #1406 index-friendly query plans unchanged.
+    $filteredGameIdsSql = [
+        'G' => null,
+        'R' => null,
+        'NG' => null,
+    ];
+    if ($applyGameFilter) {
+        if ($itemTypes & NEWITEMS_GAMES) {
+            $newestGameIds = newItemsFilteredGameIds($db, 'lnew', $gamesLimit);
+            $filteredGameIdsSql['G'] = $newestGameIds
+                ? newItemsSqlIdList($db, $newestGameIds) : "''";
+        }
+        if ($itemTypes & NEWITEMS_REVIEWS) {
+            $reviewedGameIds = newItemsFilteredGameIds($db, 'recently_reviewed', $reviewsLimit);
+            $filteredGameIdsSql['R'] = $reviewedGameIds
+                ? newItemsSqlIdList($db, $reviewedGameIds) : "''";
+        }
+        if ($itemTypes & NEWITEMS_GAMENEWS) {
+            $newsGameIds = newItemsFilteredGameIds($db, 'recent_game_news', $gamesLimit);
+            $filteredGameIdsSql['NG'] = $newsGameIds
+                ? newItemsSqlIdList($db, $newsGameIds) : "''";
         }
     }
 
-    if ($itemTypes & NEWITEMS_POLLS) {
-        $polls_limit = $options['polls_limit'] ?? $limit;
-        if ($days) $dayWhere = "p.created > date_sub(now(), interval $days day)";
-        // query the recent polls (minus muted users)
-        $anm = str_replace('#USERID#', 'p.userid', $andNotMuted);
-        $result = mysql_query(
-            "select
-               p.pollid as pollid, p.title as title, p.`desc` as `desc`,
-               p.created as d,
-               date_format(p.created, '%M %e, %Y') as fmtdate,
-               count(v.gameid) as votecnt, count(distinct v.gameid) as gamecnt,
-               p.userid as userid, u.name as `username`,
-               (u.picture is not null) as haspic
-             from
-               polls as p
-               left outer join pollvotes as v on v.pollid = p.pollid
-               join users as u on u.id = p.userid
-             where
-               u.sandbox in $sandbox
-               and $dayWhere
-               $anm
-             group by
-               p.pollid
-             order by
-               p.created desc
-             limit $polls_limit", $db);
-        $pollcnt = mysql_num_rows($result);
-        for ($i = 0 ; $i < $pollcnt ; $i++) {
-            $row = mysql_fetch_array($result, MYSQL_ASSOC);
-            $items[] = array('P', $row['d'], $row);
-        }
-    }
-
-    if ($itemTypes & NEWITEMS_REVIEWS) {
-        $reviews_limit = $options['reviews_limit'] ?? $limit;
-        $term = "";
-        $searchType = "game";
-        $sortby = "recently_reviewed";
-        $games_limit_clause = "limit $reviews_limit";
-        $browse = 0;
-        // If the user has a custom game filter and has not overridden it, that 
-        // filter will automatically be applied within the doSearch function.
-        list($game_rows_after_filtering, $rowcnt, $sortList, $errMsg, $summaryDesc, 
-            $badges, $specials, $specialsUsed, $orderBy, $game_filter_was_applied) 
-            = doSearch($db, $term, $searchType, $sortby, $games_limit_clause, $browse);
-        // Note the gameids of games that we might want to display reviews for
-        foreach ($game_rows_after_filtering as $game_row) {
-            $gameids_after_filtering[] = "'" . $game_row['id'] . "'";
-        }
-        $reviews_limit_clause = "limit $reviews_limit";
-        // prepare to query reviews
-        if ($days) $dayWhere = "greatest(reviews.createdate, ifnull(reviews.embargodate, '0000-00-00')) > date_sub(now(), interval $days day)";
-        // query the recent reviews (minus mutes)
-        $anm = str_replace('#USERID#', 'reviews.userid', $andNotMuted);
-        $result = mysql_query(
-            "select
-               reviews.id as id, gameid, summary, review, rating, special,
-               games.title as title,
-               users.id as userid, users.name as username,
-               greatest(reviews.createdate,
-                        ifnull(reviews.embargodate, '0000-00-00')) as d,
-               date_format(greatest(reviews.createdate,
-                           ifnull(reviews.embargodate, '0000-00-00')),
-                           '%M %e, %Y') as fmtdate,
-               (games.coverart is not null) as hasart,
-               games.pagevsn,
-               (users.picture is not null) as haspic,
-               games.flags
-             from
-               reviews
-               join games on games.id = reviews.gameid
-               join users on users.id = reviews.userid
-               left outer join specialreviewers on specialreviewers.id = special
-             where
-               gameid in (".join(",", $gameids_after_filtering).")
+    $reviewsIdQuery = ($applyGameFilter && ($itemTypes & NEWITEMS_REVIEWS))
+        ? ("select 'R' as kind,
+                    greatest(reviews.createdate,
+                             ifnull(reviews.embargodate, '0000-00-00')) as d,
+                    cast(reviews.id as char) as id
+             from reviews
+             join games on games.id = reviews.gameid
+             join users on users.id = reviews.userid
+             left outer join specialreviewers on specialreviewers.id = special
+             where reviews.gameid in (" . $filteredGameIdsSql['R'] . ")
                and reviews.review is not null
                and ifnull(now() >= reviews.embargodate, 1)
                and ifnull(specialreviewers.code, '') <> 'external'
                and users.sandbox in $sandbox
-               and $dayWhere
-               $anm
-             order by d desc, id desc
-             $reviews_limit_clause", $db);
-        $revcnt = mysql_num_rows($result);
-        for ($i = 0 ; $i < $revcnt ; $i++) {
-            $row = mysql_fetch_array($result, MYSQL_ASSOC);
-            $items[] = array('R', $row['d'], $row);
+               and " . newItemsDayWhere(
+                    "greatest(reviews.createdate, ifnull(reviews.embargodate, '0000-00-00'))",
+                    $days) . "
+               " . str_replace('#USERID#', 'reviews.userid', $andNotMuted))
+        // we use a union query of reviews with and without embargo so we can use the index
+        : ("select 'R' as kind, t.d as d, cast(reviews.id as char) as id
+                        from (
+                          (select id, createdate as d
+                           from reviews
+                           where review is not null
+                             and (embargodate is null or embargodate <= createdate)
+                             and (embargodate is null or embargodate <= now())
+                           order by createdate desc
+                           limit $slack)
+                          union all
+                          (select id, embargodate as d
+                           from reviews
+                           where review is not null
+                             and embargodate is not null
+                             and embargodate > createdate
+                             and embargodate <= now()
+                           order by embargodate desc
+                           limit $reviewsLimit)
+                        ) as t
+                        join reviews on reviews.id = t.id
+                        join games on games.id = reviews.gameid
+                        join users on users.id = reviews.userid
+                        left outer join specialreviewers on specialreviewers.id = special
+                        where reviews.review is not null
+                          and ifnull(now() >= reviews.embargodate, 1)
+                          and ifnull(specialreviewers.code, '') <> 'external'
+                          and users.sandbox in $sandbox
+                          and " . newItemsDayWhere("t.d", $days) . "
+                          " . str_replace('#USERID#', 'reviews.userid', $andNotMuted));
+
+    $gamesIdQuery = "select 'G' as kind, games.created as d, cast(games.id as char) as id
+                        from games
+                        join $ratingsView on games.id = gameid
+                        where " . newItemsDayWhere("games.created", $days);
+    if ($applyGameFilter && ($itemTypes & NEWITEMS_GAMES)) {
+        $gamesIdQuery .= " and games.id in (" . $filteredGameIdsSql['G'] . ")";
+    }
+
+    $gameNewsIdQuery = "select 'NG' as kind, n.created as d, cast(n.newsid as char) as id
+                        from news as n
+                        join news as norig on norig.newsid = ifnull(n.original, n.newsid)
+                        join users as uorig on uorig.id = norig.userid
+                        left outer join news as nsuper on nsuper.supersedes = n.newsid
+                        join games as g on g.id = n.sourceid
+                        where n.source = 'G'
+                          and n.status = 'A'
+                          and nsuper.newsid is null
+                          and uorig.sandbox in $sandbox
+                          and " . newItemsDayWhere("n.created", $days) . "
+                          " . str_replace('#USERID#', 'n.userid', $andNotMuted);
+    if ($applyGameFilter && ($itemTypes & NEWITEMS_GAMENEWS)) {
+        $gameNewsIdQuery .= " and g.id in (" . $filteredGameIdsSql['NG'] . ")";
+    }
+
+    $sources = [
+        [
+            'flag' => NEWITEMS_REVIEWS,
+            'kind' => 'R',
+            'limitKey' => 'reviews_limit',
+            'idQuery' => $reviewsIdQuery,
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       reviews.id as id, gameid, summary, review, rating, special,
+                       games.title as title,
+                       users.id as userid, users.name as username,
+                       greatest(reviews.createdate,
+                                ifnull(reviews.embargodate, '0000-00-00')) as d,
+                       date_format(greatest(reviews.createdate,
+                                   ifnull(reviews.embargodate, '0000-00-00')),
+                                   '%M %e, %Y') as fmtdate,
+                       (games.coverart is not null) as hasart,
+                       games.pagevsn,
+                       (users.picture is not null) as haspic,
+                       games.flags
+                     from
+                       reviews
+                       join games
+                       join users
+                       left outer join specialreviewers on specialreviewers.id = special
+                     where
+                       games.id = reviews.gameid
+                       and users.id = reviews.userid
+                       and reviews.id in ($idList)",
+                    'id');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_SITENEWS,
+            'kind' => 'S',
+            'limitKey' => 'sitenews_limit',
+            'idQuery' => "select 'S' as kind, posted as d, cast(itemid as char) as id
+                        from sitenews
+                        where " . newItemsDayWhere("posted", $days),
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       itemid as sitenewsid, title, ldesc as `desc`,
+                       posted as d,
+                       date_format(posted, '%M %e, %Y') as fmtdate,
+                       (now() < date_add(posted, interval 3 day)) as freshest
+                     from sitenews
+                     where itemid in ($idList)",
+                    'sitenewsid');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_GAMES,
+            'kind' => 'G',
+            'limitKey' => 'games_limit',
+            'idQuery' => $gamesIdQuery,
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       games.id as id, games.title as title, games.author as author,
+                       games.desc as `desc`, games.created as d,
+                       date_format(games.created, '%M %e, %Y') as fmtdate,
+                       games.system as devsys,
+                       (games.coverart is not null) as hasart, games.pagevsn
+                     from games
+                     where games.id in ($idList)",
+                    'id');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_LISTS,
+            'kind' => 'L',
+            'limitKey' => 'lists_limit',
+            'idQuery' => "select 'L' as kind, reclists.createdate as d, cast(reclists.id as char) as id
+                        from reclists
+                        join users on users.id = reclists.userid
+                        where users.sandbox in $sandbox
+                          and exists (select 1 from reclistitems
+                                      where reclistitems.listid = reclists.id)
+                          and " . newItemsDayWhere("reclists.createdate", $days) . "
+                          " . str_replace('#USERID#', 'reclists.userid', $andNotMuted),
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       reclists.id as id, reclists.title as title,
+                       reclists.`desc` as `desc`,
+                       reclists.createdate as d,
+                       date_format(reclists.createdate, '%M %e, %Y') as fmtdate,
+                       count(reclists.id) as itemcnt,
+                       reclists.userid, users.name as `username`,
+                       (users.picture is not null) as haspic
+                     from reclists
+                       join reclistitems on reclistitems.listid=reclists.id
+                       join users on users.id = reclists.userid
+                     where reclists.id in ($idList)
+                     group by reclists.id",
+                    'id');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_POLLS,
+            'kind' => 'P',
+            'limitKey' => 'polls_limit',
+            'idQuery' => "select 'P' as kind, p.created as d, cast(p.pollid as char) as id
+                        from polls as p
+                        join users as u on u.id = p.userid
+                        where u.sandbox in $sandbox
+                          and " . newItemsDayWhere("p.created", $days) . "
+                          " . str_replace('#USERID#', 'p.userid', $andNotMuted),
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       p.pollid as pollid, p.title as title, p.`desc` as `desc`,
+                       p.created as d,
+                       date_format(p.created, '%M %e, %Y') as fmtdate,
+                       count(v.gameid) as votecnt, count(distinct v.gameid) as gamecnt,
+                       p.userid as userid, u.name as `username`,
+                       (u.picture is not null) as haspic
+                     from
+                       polls as p
+                       left outer join pollvotes as v on v.pollid = p.pollid
+                       join users as u on u.id = p.userid
+                     where p.pollid in ($idList)
+                     group by p.pollid",
+                    'pollid');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_COMPS,
+            'kind' => 'C',
+            'limitKey' => 'comps_limit',
+            'idQuery' => "select 'C' as kind, c.created as d, cast(c.compid as char) as id
+                        from competitions as c
+                        where " . newItemsDayWhere("c.created", $days),
+            'hydrate' => function($db, $ids) {
+                $idList = newItemsSqlIdList($db, $ids);
+                return newItemsKeyedRows($db,
+                    "select
+                       c.compid as compid, c.title as title, c.`desc` as `desc`,
+                       c.created as d,
+                       date_format(c.created, '%M %e, %Y') as fmtdate
+                     from competitions as c
+                     where c.compid in ($idList)",
+                    'compid');
+            },
+        ],
+        [
+            'flag' => NEWITEMS_GAMENEWS,
+            'kind' => 'NG',
+            'limitKey' => 'games_limit',
+            'idQuery' => $gameNewsIdQuery,
+            'hydrate' => function($db, $ids, $andNotMuted, $sandbox) {
+                return newItemsHydrateNews(
+                    $db, $ids, "G",
+                    "join games as g on g.id = n.sourceid",
+                    "g.id as sourceID, g.title as sourceTitle, "
+                    . "(g.coverart is not null) as hasart, g.pagevsn",
+                    $andNotMuted, $sandbox);
+            },
+        ],
+        [
+            'flag' => NEWITEMS_COMPNEWS,
+            'kind' => 'NC',
+            'limitKey' => 'comps_limit',
+            'idQuery' => "select 'NC' as kind, n.created as d, cast(n.newsid as char) as id
+                        from news as n
+                        join news as norig on norig.newsid = ifnull(n.original, n.newsid)
+                        join users as uorig on uorig.id = norig.userid
+                        left outer join news as nsuper on nsuper.supersedes = n.newsid
+                        join competitions as c on c.compid = n.sourceid
+                        where n.source = 'C'
+                          and n.status = 'A'
+                          and nsuper.newsid is null
+                          and uorig.sandbox in $sandbox
+                          and " . newItemsDayWhere("n.created", $days) . "
+                          " . str_replace('#USERID#', 'n.userid', $andNotMuted),
+            'hydrate' => function($db, $ids, $andNotMuted, $sandbox) {
+                return newItemsHydrateNews(
+                    $db, $ids, "C",
+                    "join competitions as c on c.compid = n.sourceid",
+                    "c.compid as sourceID, c.title as sourceTitle",
+                    $andNotMuted, $sandbox);
+            },
+        ],
+    ];
+
+    foreach ($sources as &$src) {
+        $idQueryLimit = $options[$src['limitKey']] ?? null;
+        if ($idQueryLimit !== null) {
+            $src['idQuery'] = "(" . $src['idQuery']
+                . " order by d desc limit " . (int)$idQueryLimit . ")";
         }
     }
-
-    if ($itemTypes & NEWITEMS_COMPS) {
-        $comps_limit = $options['comps_limit'] ?? $limit;
-        if ($days) $dayWhere = "c.created > date_sub(now(), interval $days day)";
-        // query recent competition page additions
-        $result = mysql_query(
-            "select
-               c.compid as compid, c.title as title, c.`desc` as `desc`,
-               c.created as d,
-               date_format(c.created, '%M %e, %Y') as fmtdate
-             from
-               competitions as c
-             where $dayWhere
-             order by
-               d desc
-             limit $comps_limit", $db);
-        $compcnt = mysql_num_rows($result);
-        for ($i = 0 ; $i < $compcnt ; $i++) {
-            $row = mysql_fetch_array($result, MYSQL_ASSOC);
-            $items[] = array('C', $row['d'], $row);
-        }
-    }
-
-    if ($itemTypes & NEWITEMS_GAMENEWS) {
-        // Query the games and sort them so that games with recent news
-        // come first. If the user has a custom game filter and has not 
-        // overridden it, that filter will automatically be applied within 
-        // the doSearch function.
-        $term = "";
-        $searchType = "game";
-        $sortby = "recent_game_news";
-        $games_limit = $options['games_limit'] ?? $limit;
-        $limit_clause = "limit $games_limit";
-        $browse = 0;        
-        list($rows, $rowcnt, $sortList, $errMsg, $summaryDesc, $badges,
-         $specials, $specialsUsed, $orderBy) =
-         doSearch($db, $term, $searchType, $sortby, $limit_clause, $browse);
-
-        // Put the resulting game IDs in an array so that we can 
-        // limit news results to these (possibly filtered) games.
-        $games_with_recent_news = [];
-        foreach ($rows as $row) {
-            $games_with_recent_news[] = $row['id'];
-        }
-
-        // query game news updates
-        queryNewNews(
-            $items, $db, $games_limit, "G",
-            "join games as g on g.id = n.sourceid "
-            . "join recentgamenews_mv r on r.news_id = n.newsid",
-            "g.id as sourceID, g.title as sourceTitle, "
-            . "(g.coverart is not null) as hasart, g.pagevsn",
-            $days, $games_with_recent_news);
-    }
-
-
-    if ($itemTypes & NEWITEMS_COMPNEWS) {
-        $comps_limit = $options['comps_limit'] ?? $limit;
-        // add the competition news updates
-        queryNewNews(
-            $items, $db, $comps_limit, "C",
-            "join competitions as c on c.compid = n.sourceid",
-            "c.compid as sourceID, c.title as sourceTitle", $days);
-    }
-
-    // sort by date
-    usort($items, "sortNewItemsByDate");
-
-    // return the item list
-    return array($items, $game_filter_was_applied);
+    unset($src);
+    return $sources;
 }
 
 // sorting callback: sort from newest to oldest
@@ -310,90 +528,10 @@ function sortNewItemsByDate($a, $b)
     // in the mysql raw date format, which collates like an ascii string,
     // so we can compare with strcmp.  Reverse the sense of the test so
     // that we sort newest first.
-    if ($a[1] == $b[1] && is_numeric($a[2]['id'])) {
+    if ($a[1] == $b[1] && is_numeric($a[2]['id'] ?? null) && is_numeric($b[2]['id'] ?? null)) {
         return $b[2]['id'] - $a[2]['id'];
     } else {
         return strcmp($b[1], $a[1]);
-    }
-}
-
-function queryNewNews(&$items, $db, $limit, $sourceType,
-                      $sourceJoin, $sourceCols, $days = null,
-                      $games_with_recent_news = [])
-{
-    // get the logged-in user
-    checkPersistentLogin();
-    $curuser = $_SESSION['logged_in_as'] ?? null;
-
-    // filter out muted users, if applicable
-    $andNotMuted = "";
-    if ($curuser) {
-        $andNotMuted = "and (select count(*) from userfilters "
-                         . "where userid = '$curuser' "
-                         . "and targetuserid = n.userid "
-                         . "and filtertype = 'K') = 0";
-    }
-
-    $dayWhere = 1;
-    if ($days) {
-        $dayWhere = "n.created > date_sub(now(), interval $days day)";
-    }
-    // Include only reviews from our sandbox or sandbox 0 (all users)
-    $sandbox = "(0)";
-    if ($curuser)
-    {
-        // get my sandbox
-        $mysandbox = 0;
-        $result = mysql_query("select sandbox from users where id='$curuser'", $db);
-        list($mysandbox) = mysql_fetch_row($result);
-        if ($mysandbox != 0)
-            $sandbox = "(0,$mysandbox)";
-    }
-    
-    // Include game news only from games that remain after applying a custom filter
-    $andGameIDsMatch = "";
-    if ($games_with_recent_news) {
-        $games_with_recent_news = "'" . implode("', '",$games_with_recent_news) . "'";
-        $andGameIDsMatch = "and g.id in ($games_with_recent_news) ";
-    }
-
-    // query the data
-    $result = mysql_query(
-        "select
-           n.newsid as newsID,
-           n.created as d,
-           date_format(n.created, '%M %e, %Y') as createdFmt,
-           n.modified as modified,
-           date_format(n.modified, '%M %e, %Y') as modifiedFmt,
-           n.userid as userID, u.name as userName,
-           norig.userid as origUserID, uorig.name as origUserName,
-           n.headline as headline, n.body as body,
-           (u.picture is not null) as haspic,
-           $sourceCols
-         from
-           news as n
-           join users as u on u.id = n.userid
-           join news as norig on norig.newsid = ifnull(n.original, n.newsid)
-           join users as uorig on uorig.id = norig.userid
-           left outer join news as nsuper on nsuper.supersedes = n.newsid
-           $sourceJoin
-         where
-           n.source = '$sourceType'
-           and n.status = 'A'
-           and nsuper.newsid is null
-           and uorig.sandbox in $sandbox
-           and $dayWhere
-           $andNotMuted
-           $andGameIDsMatch
-         order by
-           n.created desc
-         limit $limit", $db);
-
-    $cnt = mysql_num_rows($result);
-    for ($i = 0 ; $i < $cnt ; $i++) {
-        $row = mysql_fetch_array($result, MYSQL_ASSOC);
-        $row["sourceType"] = $sourceType;
-        $items[] = array('N', $row['d'], $row);
     }
 }
 
@@ -402,7 +540,7 @@ function showNewItems($db, $first, $last, $items, $options = [])
     $itemTypes = $options['itemTypes'] ?? NEWITEMS_ALLITEMS;
     // if the caller didn't provide the new item lists, query them
     if (!$items)
-        list($items, $game_filter_was_applied) = getNewItems($db, $last, $itemTypes, $options);
+        [$items] = getNewItems($db, $last, $itemTypes, $options);
 
     // show them
     showNewItemList($db, $first, $last, $items, $options);
@@ -413,6 +551,8 @@ function showNewItems($db, $first, $last, $items, $options = [])
 
 function showNewItemList($db, $first, $last, $items, $options)
 {
+    // The markdown parser library
+    $parsedown = new Parsedown();
     $showFlagged = $options['showFlagged'] ?? false;
     $allowHiddenBanner = $options['allowHiddenBanner'] ?? true;
     $showDescriptions = $options['showDescriptions'] ?? true;
@@ -425,7 +565,7 @@ function showNewItemList($db, $first, $last, $items, $options)
     if (!$showFlagged && $allowHiddenBanner) {
         for ($idx = $first ; $idx <= $last && $idx < $totcnt ; $idx++)
         {
-            list($pick, $rawDate, $row) = $items[$idx];
+            [$pick, $rawDate, $row] = $items[$idx];
             if ($pick == 'R' && ($row['flags'] & FLAG_SHOULD_HIDE)) {
                 $showHiddenBanner = true;
                 break;
@@ -447,7 +587,7 @@ function showNewItemList($db, $first, $last, $items, $options)
     for ($idx = $first ; $idx <= $last && $idx < $totcnt ; $idx++)
     {
         // get this item
-        list($pick, $rawDate, $row) = $items[$idx];
+        [$pick, $rawDate, $row] = $items[$idx];
 
         $eager = ($idx < 4 ? "class='eager'" : "");
 
@@ -478,11 +618,11 @@ function showNewItemList($db, $first, $last, $items, $options)
             // image, otherwise generic review icon
             if ($enableImages) {
                 if ($r["haspic"]) {
-                    echo "<a href=\"showuser?id={$r['userid']}\">"
+                    echo "<a href=\"showuser?id={$r['userid']}\" aria-hidden=\"true\" tabindex=\"-1\">"
                         . "<img border=0 width=50 height=50 src=\"showuser?id={$r['userid']}&pic"
-                        . "&thumbnail=50x50\"></a>";
+                        . "&thumbnail=50x50\" alt=\"\"></a>";
                 } else if ($r["hasart"]) {
-                    echo "<a href=\"viewgame?id={$r['gameid']}\">"
+                    echo "<a href=\"viewgame?id={$r['gameid']}\" aria-hidden=\"true\" tabindex=\"-1\">"
                         . coverArtThumbnail($r['gameid'], 50, $r['pagevsn'])
                         . "</a>";
                 } else {
@@ -518,7 +658,7 @@ function showNewItemList($db, $first, $last, $items, $options)
             }
 
             $stars = showStars($r['rating']);
-            list($summary, $len, $trunc) = summarizeHtml($r['review'], 140);
+            [$summary, $len, $trunc] = summarizeHtml($parsedown->line($r['review']), 140);
             $summary = fixDesc($summary);
             if ($len != 0 || $stars != "")
             {
@@ -557,7 +697,7 @@ function showNewItemList($db, $first, $last, $items, $options)
             $itemS = $itemcnt == 1 ? "" : "s";
             $title = htmlspecialcharx($l['title']);
             $username = htmlspecialcharx($l['username']);
-            list($desc, $len, $trunc) = summarizeHtml($l['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($l['desc'], 210);
             $desc = fixDesc($desc);
 
             // show the image: user image if available, otherwise the
@@ -613,7 +753,7 @@ function showNewItemList($db, $first, $last, $items, $options)
                 . htmlspecialcharx($g['author'])
                 . " <span class=notes><i>{$g['fmtdate']}</i></span>";
 
-            list($summary, $len, $trunc) = summarizeHtml($g['desc'], 210);
+            [$summary, $len, $trunc] = summarizeHtml($g['desc'], 210);
             $summary = fixDesc($summary);
             if ($len != 0)
                 echo "<br><div class=indented><span class=details><i>"
@@ -632,7 +772,7 @@ function showNewItemList($db, $first, $last, $items, $options)
             $uid = $p['userid'];
             $uname = htmlspecialcharx($p['username']);
             $title = htmlspecialcharx($p['title']);
-            list($desc, $len, $trunc) = summarizeHtml($p['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($p['desc'], 210);
             $desc = fixDesc($desc);
             $votecnt = $p['votecnt'];
             $gamecnt = $p['gamecnt'];
@@ -707,8 +847,8 @@ function showNewItemList($db, $first, $last, $items, $options)
                     echo "<a href=\"showuser?id={$n['userID']}\">"
                         . "<img border=0 width=50 height=50 src=\"showuser?id={$n['userID']}&pic"
                         . "&thumbnail=50x50\"></a>";
-                } else if ($n["hasart"]) {
-                    echo "<a href=\"viewgame?id={$n['gameid']}\">"
+                } else if (!empty($n["hasart"])) {
+                    echo "<a href=\"viewgame?id=$gid\">"
                         . coverArtThumbnail($gid, 50, $n['pagevsn'])
                         . "</a>";
                 } else {
@@ -736,7 +876,7 @@ function showNewItemList($db, $first, $last, $items, $options)
             // pull out the competition item
             $cid = $c["compid"];
             $ctitle = htmlspecialcharx($c["title"]);
-            list($cdesc, $len, $trunc) = summarizeHtml($c["desc"], 210);
+            [$cdesc, $len, $trunc] = summarizeHtml($c["desc"], 210);
             $cdesc = fixDesc($cdesc);
             $cdate = $c["fmtdate"];
 
@@ -769,13 +909,13 @@ function showNewItemList($db, $first, $last, $items, $options)
 function showNewItemsRSS($db, $showcnt)
 {
     // query the new items
-    list($items, $game_filter_was_applied) = getNewItems($db, $showcnt - 1);
+    [$items] = getNewItems($db, $showcnt - 1);
     $totcnt = count($items);
 
     $lastBuildDate = false;
     for ($idx = 0 ; $idx < $showcnt && $idx < $totcnt ; $idx++)
     {
-        list($pick, $rawDate, $row) = $items[$idx];
+        [$pick, $rawDate, $row] = $items[$idx];
         if (!$lastBuildDate) {
             $lastBuildDate = $rawDate;
         } else if ($rawDate < $lastBuildDate) {
@@ -787,11 +927,14 @@ function showNewItemsRSS($db, $showcnt)
         }
     }
 
+    // The markdown parser library
+    $parsedown = new Parsedown();
+
     // show the items
     for ($idx = 0 ; $idx < $showcnt && $idx < $totcnt ; $idx++)
     {
         // decode this item
-        list($pick, $rawDate, $row) = $items[$idx];
+        [$pick, $rawDate, $row] = $items[$idx];
 
         // get the details on the next item
         if ($pick == 'R')
@@ -816,7 +959,7 @@ function showNewItemsRSS($db, $showcnt)
                 }
                 $title .= $stars;
             }
-            $desc = fixDesc($r['review'], FixDescSpoiler | FixDescRSS);
+            $desc = fixDesc(parsedownMultilineText($r['review']), FixDescSpoiler | FixDescRSS);
             $link = get_root_url() . "viewgame?id={$r['gameid']}"
                     . "&review={$r['id']}";
             $pubDate = $r['d'];
@@ -825,7 +968,7 @@ function showNewItemsRSS($db, $showcnt)
         {
             $l = $row;
             $title = "A Recommended List by {$l['username']}: {$l['title']}";
-            list($desc, $len, $trunc) = summarizeHtml($l['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($l['desc'], 210);
             $desc = fixDesc($desc);
             $link = get_root_url() . "viewlist?id={$l['id']}";
             $pubDate = $l['d'];
@@ -834,7 +977,7 @@ function showNewItemsRSS($db, $showcnt)
         {
             $p = $row;
             $title = "A poll by {$p['username']}: {$p['title']}";
-            list($desc, $len, $trunc) = summarizeHtml($p['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($p['desc'], 210);
             $desc = fixDesc($desc);
             $link = get_root_url() . "poll?id={$p['pollid']}";
             $pubDate = $p['d'];
@@ -843,7 +986,7 @@ function showNewItemsRSS($db, $showcnt)
         {
             $n = $row;
             $title = "News on {$n['sourceTitle']}: {$n['headline']}";
-            list($desc, $len, $trunc) = summarizeHtml($n['body'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($n['body'], 210);
             $desc = fixDesc($desc);
             $desc = "Reported by {$n['origUserName']}: $desc";
             $link = get_root_url() . "newslog?newsid={$n['newsID']}";
@@ -853,7 +996,7 @@ function showNewItemsRSS($db, $showcnt)
         {
             $c = $row;
             $title = "A new competition page: {$c['title']}";
-            list($desc, $len, $trunc) = summarizeHtml($c['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($c['desc'], 210);
             $desc = fixDesc($desc);
             $link = get_root_url() . "viewcomp?id={$c['compid']}";
             $pubDate = $c['d'];
@@ -862,7 +1005,7 @@ function showNewItemsRSS($db, $showcnt)
         {
             $g = $row;
             $title = "A new listing for {$g['title']} by {$g['author']}";
-            list($desc, $len, $trunc) = summarizeHtml($g['desc'], 210);
+            [$desc, $len, $trunc] = summarizeHtml($g['desc'], 210);
             $desc = fixDesc($desc);
             $link = get_root_url() . "viewgame?id={$g['id']}";
             $pubDate = $g['d'];

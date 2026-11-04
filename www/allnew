@@ -12,9 +12,7 @@ $db = dbConnect();
 define("PER_PAGE", 50);
 $reviews = isset($_REQUEST['reviews']);
 $type = $reviews ? NEWITEMS_REVIEWS : NEWITEMS_ALLITEMS;
-$pg = isset($_REQUEST['pg']) ? $_REQUEST['pg'] : "";
-if ($pg < 1)
-    $pg = 1;
+[, $pg] = parse_page($_REQUEST['pg'] ?? "");
 
 $showFlagged = isset($_GET['showFlagged']) && $_GET['showFlagged'];
 $override_game_filter = get_req_data('nogamefilter');
@@ -24,7 +22,7 @@ $firstOnPage = ($pg - 1) * PER_PAGE;
 $lastOnPage = $firstOnPage + PER_PAGE - 1;
 
 // query the items
-list($items, $game_filter_was_applied) = getNewItems($db, $lastOnPage + 1, $type, $override_game_filter);
+[$items, $game_filter_was_applied] = getNewItems($db, PER_PAGE, $type, ['offset' => $firstOnPage]);
 $tot = count($items);
 
 $params = [];
@@ -52,7 +50,7 @@ echo "<h1>$pageTitle</h1>\n<div class='prerender-moderate'>\n";
 echo "$pageCtl<p><hr class=dots><p>";
 
 // show the new items
-showNewItems($db, $firstOnPage, $lastOnPage, $items, ['showFlagged' => $showFlagged]);
+showNewItems($db, 0, PER_PAGE - 1, $items, ['showFlagged' => $showFlagged]);
 
 // show the page controls again at the bottom
 echo "<p><hr class=dots><p>$pageCtl<br>\n";

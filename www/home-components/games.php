@@ -17,13 +17,16 @@
 define("ENABLE_IMAGES", 1);
 
 // get the latest games and game news
-list($items, $game_filter_was_applied) = getNewItems($db, 6, NEWITEMS_GAMES | NEWITEMS_GAMENEWS);
+[$items, $game_filter_was_applied] = getNewItems($db, 6, NEWITEMS_GAMES | NEWITEMS_GAMENEWS);
 
 // show the items
 $totcnt = count($items);
 
 for ($idx = 0 ; $idx <= 5; $idx++)
 {
+    if (!isset($items[$idx])) {
+        break;
+    }
     // get this item
     [$pick, $rawDate, $row] = $items[$idx];
 
@@ -52,8 +55,8 @@ for ($idx = 0 ; $idx <= 5; $idx++)
         // generic game icon
         if (ENABLE_IMAGES) {
             if ($g["hasart"]) {
-                echo "<a href=\"viewgame?id={$g['id']}\">"
-                    . coverArtThumbnail($g['id'], 50, $g['pagevsn'])
+                echo "<a href=\"viewgame?id={$g['id']}\" aria-hidden=\"true\" tabindex=\"-1\">"
+                    . coverArtThumbnail($g['id'], 50, $g['pagevsn'])       
                     . "</a>";
             } else {
                 // echo "<a href=\"viewgame?id={$g['id']}\">"
@@ -93,17 +96,17 @@ for ($idx = 0 ; $idx <= 5; $idx++)
         $divclass = "new-game-news";
         $href = "viewgame?id=$gid";
 
-        // show the image: user image if available, otherwise game
+        // show the image: game image if available, otherwise user
         // image, otherwise generic review icon
         if (ENABLE_IMAGES) {
-            if (isset($n["haspic"]) && $n["haspic"]) {
-                echo "<a href=\"showuser?id={$n['userID']}\">"
-                    . "<img border=0 width=50 height=50 src=\"showuser?id={$n['userID']}&pic"
-                    . "&thumbnail=50x50\"></a>";
-            } else if ($n["hasart"]) {
-                echo "<a href=\"viewgame?id={$n['gameid']}\">"
+            if ($n["hasart"]) {
+                echo "<a href=\"viewgame?id=$gid\" aria-hidden=\"true\" tabindex=\"-1\">"
                     . coverArtThumbnail($gid, 50, $n['pagevsn'])
                     . "</a>";
+            } else if (isset($n["haspic"]) && $n["haspic"]) {
+                echo "<a href=\"showuser?id={$n['userID']}\">" 
+                    . "<img border=0 width=50 height=50 src=\"showuser?id={$n['userID']}&pic"
+                    . "&thumbnail=50x50\" alt=\"$nuname\"></a>";
             } else {
                 // echo "<a href=\"newslog?newsid=$nid\">"
                 //     . "<img border=0 src=\"news50.gif\"></a>";
