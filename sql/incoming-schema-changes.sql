@@ -63,24 +63,23 @@ CREATE PROCEDURE refresh_recentgamenews_mv (
     IN new_newsid BIGINT(20)
 )
 BEGIN
-select *
-from recentgamenews
-where news_id = new_newsid
-into @news_id,
-     @game_id,
-     @news_create_date;
-if @news_id is null then
-    delete from recentgamenews_mv where news_id = new_newsid;
-else
-insert into recentgamenews_mv
-values (
-        @news_id,
-        @game_id,
-        @news_create_date
-    ) on duplicate key
-update news_id = @news_id,
-    game_id = @game_id,
-    news_create_date = @news_create_date;
+-- Clear session vars first: SELECT INTO leaves them unchanged when no row matches.
+SET @news_id = NULL;
+SET @game_id = NULL;
+SET @news_create_date = NULL;
+SELECT news_id, game_id, news_create_date
+FROM recentgamenews
+WHERE news_id = new_newsid
+INTO @news_id, @game_id, @news_create_date;
+IF @news_id IS NULL THEN
+    DELETE FROM recentgamenews_mv WHERE news_id = new_newsid;
+ELSE
+    INSERT INTO recentgamenews_mv
+    VALUES (@news_id, @game_id, @news_create_date)
+    ON DUPLICATE KEY UPDATE
+        news_id = @news_id,
+        game_id = @game_id,
+        news_create_date = @news_create_date;
 END IF;
 END;
 $$
@@ -90,22 +89,22 @@ DELIMITER ;
 
 
 -- Create triggers so that when a news item for a game is added to the news table,
--- the latest news date and the latest news id for that game will automatically
--- be updated in the recentgamenews_mv materialized view. [Question: How do I limit this to just game news?]
+-- the recentgamenews_mv materialized view stays in sync.
 
+DROP TRIGGER IF EXISTS recentgamenews_insert;
 CREATE TRIGGER recentgamenews_insert
 AFTER INSERT ON news FOR EACH ROW
-call refresh_recentgamenews_mv(NEW.newsid);
+CALL refresh_recentgamenews_mv(NEW.newsid);
 
-
+DROP TRIGGER IF EXISTS recentgamenews_update;
 CREATE TRIGGER recentgamenews_update
 AFTER UPDATE ON news FOR EACH ROW
-call refresh_recentgamenews_mv(NEW.newsid);
+CALL refresh_recentgamenews_mv(NEW.newsid);
 
-
+DROP TRIGGER IF EXISTS recentgamenews_delete;
 CREATE TRIGGER recentgamenews_delete
 AFTER DELETE ON news FOR EACH ROW
-call refresh_recentgamenews_mv(OLD.newsid);
+CALL refresh_recentgamenews_mv(OLD.newsid);
 
 DROP TABLE IF EXISTS `global_settings`;
 CREATE TABLE `global_settings` ( 

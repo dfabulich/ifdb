@@ -56,6 +56,8 @@ comp_desc=A competition from hurl smoke ${suffix}
 review_summary=Hurl smoke summary ${suffix}
 review_body=This is a hurl smoke test review body for ${suffix}.
 comment_body=Hurl smoke comment on the review ${suffix}.
+news_headline=Hurl Smoke News ${suffix}
+news_body=Game news created by hurl smoke tests ${suffix}.
 game_title_encoded=${encodeURIComponent(`Hurl Smoke Game ${suffix}`)}
 poll_title_encoded=${encodeURIComponent(`Hurl Smoke Poll ${suffix}`)}
 list_title_encoded=${encodeURIComponent(`Hurl Smoke List ${suffix}`)}
@@ -128,6 +130,14 @@ runHurl([
   join(HTTP_DIR, 'write/write.hurl'),
 ]);
 convertCapturesToVars();
+
+console.log('==> Game filter');
+runHurl([
+  '--test',
+  '--variables-file',
+  varsFile,
+  join(HTTP_DIR, 'write/game-filter.hurl'),
+]);
 
 const readonlyFiles = readdirSync(join(HTTP_DIR, 'readonly'))
   .filter((name) => name.endsWith('.hurl'))
